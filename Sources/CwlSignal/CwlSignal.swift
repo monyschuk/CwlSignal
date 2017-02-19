@@ -291,7 +291,7 @@ public class Signal<T> {
 		return { (r: Result<U>, n: SignalNext<V>) in
 			switch r {
 			case .success(let v): handler(v, n)
-			case .failure(let e): n.send(error: e)
+			case .failure(let e): n.send(result: .failure(e))
 			}
 		}
 	}
@@ -382,7 +382,7 @@ public class Signal<T> {
 		return { (s: inout S, r: Result<U>, n: SignalNext<V>) in
 			switch r {
 			case .success(let v): handler(&s, v, n)
-			case .failure(let e): n.send(error: e)
+			case .failure(let e): n.send(result: .failure(e))
 			}
 		}
 	}
@@ -2222,7 +2222,6 @@ public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 	///		2. SignalError.loop (the `SignalInput` was a predecessor of the joinable handler so joining would have formed a loop in the graph)
 	///	The error is the first element of the tuple and the new `SignalInput` is the second (the old `SignalInput` was invalidated during this process).
 	///	* .succeeded – the join succeeded
-	@discardableResult
 	public func join(toInput: SignalInput<T>) throws {
 		try joinFunction(processor: self, disconnect: self.disconnect, toInput: toInput, optionalErrorHandler: nil)
 	}
@@ -2236,7 +2235,6 @@ public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 	///	* .cancelled – if the `SignalInput` wasn't the active input for its `Signal`
 	///	* .replaced(SignalInput<T>) - Upon attempting to connect the successor to self, self was found to already have a successor connected (must have occurred on another thread between the separate "disconnect" and "join" steps performed during this function). The `toInput` parameter has been invalidated and the new input is contained in this case value.
 	///	* .succeeded – the join succeeded
-	@discardableResult
 	public func join(toInput: SignalInput<T>, onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) throws {
 		try joinFunction(processor: self, disconnect: self.disconnect, toInput: toInput, optionalErrorHandler: onError)
 	}
@@ -2247,7 +2245,7 @@ public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 			do {
 				try join(toInput: input)
 			} catch {
-				input.send(error: error)
+				input.send(result: .failure(error))
 			}
 		}
 	}
@@ -2259,7 +2257,7 @@ public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 			do {
 				try join(toInput: input, onError: onError)
 			} catch {
-				input.send(error: error)
+				input.send(result: .failure(error))
 			}
 		}
 	}
@@ -2460,18 +2458,6 @@ public final class SignalCapture<T>: SignalProcessor<T, T> {
 		let (input, output) = Signal<T>.create()
 		try! join(toInput: input, resend: resend, onError: onError)
 		return output.subscribe(context: context, handler: handler)
-	}
-	
-	public func subscribeValues(resend: Bool = false, context: Exec = .direct, handler: @escaping (T) -> Void) -> SignalEndpoint<T> {
-		let (input, output) = Signal<T>.create()
-		try! join(toInput: input, resend: resend)
-		return output.subscribeValues(context: context, handler: handler)
-	}
-	
-	public func subscribeValues(resend: Bool = false, onError: @escaping (SignalCapture<T>, Error, SignalInput<T>) -> (), context: Exec = .direct, handler: @escaping (T) -> Void) -> SignalEndpoint<T> {
-		let (input, output) = Signal<T>.create()
-		try! join(toInput: input, resend: resend, onError: onError)
-		return output.subscribeValues(context: context, handler: handler)
 	}
 }
 

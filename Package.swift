@@ -7,9 +7,10 @@ let package = Package(
 	],
 	exclude: [
 		"LICENSE.txt",
+		"ReadMe.md",
 		"CwlSignal.playground",
 		"Sources/CwlSignal/CwlSignal.h",
 		"Sources/CwlSignal/Info.plist",
-		"Tests/CwlSignal/Info.plist"
+		"Tests/CwlSignalTests/Info.plist"
 	]
 )

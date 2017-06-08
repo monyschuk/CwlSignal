@@ -33,6 +33,8 @@ import CwlUtils
 ///	- signal: the sequence of `Result` instances, or individual instances of `Result` that pass through instances of `Signal`
 ///	- `signal`: when used as a parameter label, refers to an instance of `Signal` (invidivual `Result` instances are identified as `result`, `value` or `error` in parameter labels).
 ///
+/// # INTERNAL DESIGN
+///
 /// The primary design goals for this implementation are:
 ///	1. All possible actions are threadsafe
 ///	2. No possible action results in undefined, corrupt or assertion failure behavior
@@ -48,9 +50,13 @@ import CwlUtils
 /// This ensures that no problematic work is performed inside a mutex but it means that we often have "in-flight" work occurring outside a mutex that might no longer be valid. So we need to combine this work identifiers that allow us to reject out-of-date work. That's where the second point becomes important.
 /// The "activationCount" for an `Signal` changes any time a manual input control is generated (`SignalInput`/`SignalMergeSet`), any time a first predecessor is added or any time there are predecessors connected and the `delivery` state changes to or from `.disabled`. Combined with the fact that it is not possible to disconnect and re-add the same predecessor to a multi-input Signal (SignalMergeSet or SignalCombiner) this guarantees any messages from out-of-date but still in-flight deliveries are ignored.
 ///
-/// While all actions are threadsafe, there are some points to keep in mind:
-///	1. If a subsequent result is sent to a Signal while it is synchronously processing a previous result the subsequent result will be queued and handled on the previous thread once it completes processing. It is important to keep in mind that while synchronous processing *usually* occurs on the sending thread, it is not a guarantee. In this scenario, processing occurs on the previous thread which is now forced to do work for the subsequent thread.
-///	2. For the disconnectable handler components (SignalMergeSet, SignalJunction, SignalCapture) it is possible to manipulate the graph from multiple threads at once in ways that might cause in-progress actions to be cancelled (since they are superceded by manipulation from other threads). In general, multi-threaded graph manipulation should be either avoided or considered carefully to ensure sensible results are delivered.
+/// # LIMITS TO THREADSAFETY
+///
+/// While all actions on `Signal` are threadsafe, there are some points to keep in mind:
+///   1. Threadsafe means that the internal members of the `Signal` class will remain threadsafe and your own closures will always be invoked correctly on the provided `Exec` context. However, this doesn't mean that work you perform in processing closures is always threadsafe; if the signal `ValueType` is a shared reference or your processing closures capture other shared references, you'll still need to employ additional mutual exclusion to protect access to these shared references. The easiest way to do this involves specifying an `Exec` contexts on your signal processing stages that apply mutual exclusion automatically when invoking the processor.
+///   2. Related to the previous point... synchronous pipelines are processed in nested fashion (when `send` is invoked on a `SignalNext`, the next stage in the signal graph is invoked while the previous stage is still on the call-stack). If you use a mutex on a synchronous stage, do not attempt to re-enter the mutex on subsequent stages or you risk deadlock. If you want to apply a mutex to your processing stages, you should either ensure the stages are invoked *asynchronously* (choose an async `Exec` context) or you should apply the mutex to the first stage and use `.direct` for subsquent stages (knowing that they'll be protected by the mutex from the *first* stage).
+///	3. Synchronous delivery through signal processing closures is only guaranteed when signals are sent from a single thread. If a subsequent result is sent to a `Signal` on a second thread while the `Signal` is processing a previous result from a first thread the subsequent result will be *queued* and handled on the *first* thread once it completes processing the earlier values.
+///   4. Handlers, captured values and state values will be released *outside* all contexts or mutexes. If you capture and object with `deinit` behavior in a processing closure, you must apply any synchronization context yourself.
 public class Signal<T> {
 	public typealias ValueType = T
 	
@@ -78,7 +84,8 @@ public class Signal<T> {
 	fileprivate final var itemProcessing: Bool = false
 	
 	// Notifications for the inverse of `delivery == .disabled`. Accessed only through the `generate` constructor. Can be used for lazy construction/commencement, resetting to initial state on graph disconnect and reconnect or cleanup after graph deletion.
-	fileprivate final var newInputSignal: Signal<SignalInput<T>?>? = nil
+	// A signal is used here instead of a simple function callback since re-entrancy-safe queueing and context delivery are needed.
+	fileprivate final var newInputSignal: (Signal<SignalInput<T>?>, SignalEndpoint<SignalInput<T>?>)? = nil
 	
 	// If there is a preceeding `Signal` in the graph, its `SignalProcessor` is stored in this variable.
 	fileprivate final var preceeding: Set<OrderedSignalPredecessor>
@@ -124,25 +131,24 @@ public class Signal<T> {
 	/// - parameter activationChange: receives inputs on activation and nil on each deactivation
 	///
 	/// - returns: the constructed `Signal`
-	public static func generate(context: Exec = .direct, activationChange: @escaping (_ input: SignalInput<T>?)-> Void) -> Signal<T> {
+	public static func generate(context: Exec = .direct, activationChange: @escaping (_ input: SignalInput<T>?) -> Void) -> Signal<T> {
 		let s = Signal<T>()
-		s.newInputSignal = Signal<SignalInput<T>?>()
-		s.newInputSignal?.subscribe(context: context) { r in
-			switch r {
-			case .success(let v): activationChange(v)
-			default: break
+		let nis = Signal<SignalInput<T>?>()
+		s.newInputSignal = (nis, nis.subscribe(context: context) { r in
+			if case .success(let v) = r {
+				activationChange(v)
 			}
-		}.keepAlive()
+		})
 		return s
 	}
 	
 	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
 	///
 	/// - returns: the `SignalInput` and `Signal` pair
-	public static func mergeSetAndSignal<S: Sequence>(_ initialInputs: S, closesOutput: Bool = false, removeOnDeactivate: Bool = false) -> (mergeSet: SignalMergeSet<T>, signal: Signal<T>) where S.Iterator.Element: Signal<T> {
-		let (mergeSet, signal) = Signal<T>.mergeSetAndSignal()
+	public static func createMergeSet<S: Sequence>(_ initialInputs: S, closesOutput: Bool = false, removeOnDeactivate: Bool = false) -> (mergeSet: SignalMergeSet<T>, signal: Signal<T>) where S.Iterator.Element: Signal<T> {
+		let (mergeSet, signal) = Signal<T>.createMergeSet()
 		for i in initialInputs {
-			mergeSet.add(i, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
+			try! mergeSet.add(i, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
 		}
 		return (mergeSet, signal)
 	}
@@ -150,10 +156,10 @@ public class Signal<T> {
 	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
 	///
 	/// - returns: the `SignalInput` and `Signal` pair
-	public static func mergeSetAndSignal<S: Sequence, U>(_ initialInputs: S, closesOutput: Bool = false, removeOnDeactivate: Bool = false, compose: (Signal<T>) throws -> U) rethrows -> (mergeSet: SignalMergeSet<T>, composed: U) where S.Iterator.Element: Signal<T> {
-		let (mergeSet, signal) = try Signal<T>.mergeSetAndSignal(compose: compose)
+	public static func createMergeSet<S: Sequence, U>(_ initialInputs: S, closesOutput: Bool = false, removeOnDeactivate: Bool = false, compose: (Signal<T>) throws -> U) rethrows -> (mergeSet: SignalMergeSet<T>, composed: U) where S.Iterator.Element: Signal<T> {
+		let (mergeSet, signal) = try Signal<T>.createMergeSet(compose: compose)
 		for i in initialInputs {
-			mergeSet.add(i, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
+			try! mergeSet.add(i, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
 		}
 		return (mergeSet, signal)
 	}
@@ -161,7 +167,7 @@ public class Signal<T> {
 	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
 	///
 	/// - returns: the `SignalInput` and `Signal` pair
-	public static func mergeSetAndSignal() -> (mergeSet: SignalMergeSet<T>, signal: Signal<T>) {
+	public static func createMergeSet() -> (mergeSet: SignalMergeSet<T>, signal: Signal<T>) {
 		let s = Signal<T>()
 		var dw = DeferredWork()
 		s.mutex.sync { s.updateActivationInternal(andInvalidateAllPrevious: true, dw: &dw) }
@@ -172,8 +178,8 @@ public class Signal<T> {
 	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
 	///
 	/// - returns: the `SignalInput` and `Signal` pair
-	public static func mergeSetAndSignal<U>(compose: (Signal<T>) throws -> U) rethrows -> (mergeSet: SignalMergeSet<T>, composed: U) {
-		let (m, s) = mergeSetAndSignal()
+	public static func createMergeSet<U>(compose: (Signal<T>) throws -> U) rethrows -> (mergeSet: SignalMergeSet<T>, composed: U) {
+		let (m, s) = createMergeSet()
 		return (m, try compose(s))
 	}
 	
@@ -189,43 +195,43 @@ public class Signal<T> {
 		}
 	}
 	
-	// Internal implementation for join(toInput:) and join(toInput:onError:)
+	// Internal implementation for join(to:) and join(to:onError:)
 	//
-	// - parameter toInput:              an input that identifies a destination `Signal`
-	// - parameter optionalErrorHandler: if nil, errors from self will be passed through to `toInput`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalJunction` and the input created by calling `disconnect` on it.
+	// - parameter to:              an input that identifies a destination `Signal`
+	// - parameter optionalErrorHandler: if nil, errors from self will be passed through to `to`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalJunction` and the input created by calling `disconnect` on it.
 	//
-	/// - returns: if `toInput` is still the current input for its `Signal`, then a `SignalJunction<T>` that allows the join to be later broken, otherwise `nil`.
-	private final func join(toInput: SignalInput<T>, optionalErrorHandler: ((SignalJunction<T>, Error, SignalInput<T>) -> ())?) throws -> SignalJunction<T> {
+	/// - returns: if `to` is still the current input for its `Signal`, then a `SignalJunction<T>` that allows the join to be later broken, otherwise `nil`.
+	private final func join(to: SignalInput<T>, optionalErrorHandler: ((SignalJunction<T>, Error, SignalInput<T>) -> ())?) throws -> SignalJunction<T> {
 		let disconnector = attach { (s, dw) -> SignalJunction<T> in
 			return SignalJunction<T>(signal: s, dw: &dw)
 		}
 		if let onError = optionalErrorHandler {
-			try disconnector.join(toInput: toInput, onError: onError)
+			try disconnector.join(to: to, onError: onError)
 		} else {
-			try disconnector.join(toInput: toInput)
+			try disconnector.join(to: to)
 		}
 		return disconnector
 	}
 	
 	/// Fuses the output of this `Signal` to a manual `SignalInput<T>` so that values sent to this `Signal` are immediately sent through the `SignalInput<T>`'s `Signal`.
 	///
-	/// - parameter toInput: an input that identifies a destination `Signal`
+	/// - parameter to: an input that identifies a destination `Signal`
 	///
-	/// - returns: if `toInput` is still the current input for its `Signal`, then a `SignalJunction<T>` that allows the join to be later broken, otherwise `nil`.
+	/// - returns: if `to` is still the current input for its `Signal`, then a `SignalJunction<T>` that allows the join to be later broken, otherwise `nil`.
 	@discardableResult
-	public final func join(toInput: SignalInput<T>) throws -> SignalJunction<T> {
-		return try join(toInput: toInput, optionalErrorHandler: nil)
+	public final func join(to: SignalInput<T>) throws -> SignalJunction<T> {
+		return try join(to: to, optionalErrorHandler: nil)
 	}
 	
 	/// Fuses the output of this `Signal` to a manual `SignalInput<T>` so that values sent to this `Signal` are immediately sent through the `SignalInput<T>`'s `Signal`.
 	///
-	/// - parameter toInput: an input that identifies a destination `Signal`
-	/// - parameter onError: if nil, errors from self will be passed through to `toInput`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalJunction` and the input created by calling `disconnect` on it.
+	/// - parameter to: an input that identifies a destination `Signal`
+	/// - parameter onError: if nil, errors from self will be passed through to `to`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalJunction` and the input created by calling `disconnect` on it.
 	///
-	/// - returns: if `toInput` is still the current input for its `Signal`, then a `SignalJunction<T>` that allows the join to be later broken, otherwise `nil`.
+	/// - returns: if `to` is still the current input for its `Signal`, then a `SignalJunction<T>` that allows the join to be later broken, otherwise `nil`.
 	@discardableResult
-	public final func join(toInput: SignalInput<T>, onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) throws -> SignalJunction<T> {
-		return try join(toInput: toInput, optionalErrorHandler: onError)
+	public final func join(to: SignalInput<T>, onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) throws -> SignalJunction<T> {
+		return try join(to: to, optionalErrorHandler: onError)
 	}
 	
 	/// Appends a disconnected `SignalJunction` to this `Signal` so outputs can be repeatedly joined and disconnected from this graph in the future.
@@ -244,7 +250,7 @@ public class Signal<T> {
 	@discardableResult
 	public final func junctionSignal() -> (SignalJunction<T>, Signal<T>) {
 		let (input, signal) = Signal<T>.create()
-		let j = try! self.join(toInput: input)
+		let j = try! self.join(to: input)
 		return (j, signal)
 	}
 	
@@ -254,7 +260,7 @@ public class Signal<T> {
 	@discardableResult
 	public final func junctionSignal(onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) -> (SignalJunction<T>, Signal<T>) {
 		let (input, signal) = Signal<T>.create()
-		let j = try! self.join(toInput: input, onError: onError)
+		let j = try! self.join(to: input, onError: onError)
 		return (j, signal)
 	}
 	
@@ -472,7 +478,7 @@ public class Signal<T> {
 	/// - returns: a continuous `SignalMulti`
 	public final func continuous(initial: T) -> SignalMulti<T> {
 		return SignalMulti<T>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([initial], nil), isUserUpdated: false, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([initial], nil), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
 				let previous: (Array<T>, Error?) = (a, p)
 				switch r {
 				case .success(let v): a = [v]
@@ -488,7 +494,23 @@ public class Signal<T> {
 	/// - returns: a continuous `SignalMulti`
 	public final func continuous() -> SignalMulti<T> {
 		return SignalMulti<T>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), isUserUpdated: false, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
+				let previous: (Array<T>, Error?) = (a, p)
+				switch r {
+				case .success(let v): a = [v]; p = nil
+				case .failure(let e): a = []; p = e
+				}
+				return previous
+			})
+		})
+	}
+	
+	/// Appends a new `SignalMulti` to this `Signal`. The new `SignalMulti` does not immediately activate (it waits until an endpoint activates it normally). The first activator receives no cached values but subsequent activators will receive the most recent value. Upon deactivation, the cached value is discarded and deactivation is propagated normally to antecedents.
+	///
+	/// - returns: a continuous `SignalMulti`
+	public final func continuousWhileActive() -> SignalMulti<T> {
+		return SignalMulti<T>(processor: attach { (s, dw) in
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: false, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
 				let previous: (Array<T>, Error?) = (a, p)
 				switch r {
 				case .success(let v): a = [v]; p = nil
@@ -504,7 +526,7 @@ public class Signal<T> {
 	/// - returns: a playback `SignalMulti`
 	public final func playback() -> SignalMulti<T> {
 		return SignalMulti<T>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), isUserUpdated: false, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<T>, Error?) in
 				switch r {
 				case .success(let v): a.append(v)
 				case .failure(let e): p = e
@@ -528,22 +550,21 @@ public class Signal<T> {
 	/// - returns: a "multicast" `SignalMulti`.
 	public final func multicast() -> SignalMulti<T> {
 		return SignalMulti<T>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), isUserUpdated: false, dw: &dw, context: .direct, updater: nil)
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: false, dw: &dw, context: .direct, updater: nil)
 		})
 	}
 	
-	/// Appends a new `SignalMulti` to this `Signal`. The new `SignalMulti` immediately activates its antecedents. Every time a value is received, it is passed to an "updater" which updates the array of activation values (multiple listeners can be attached to the `SignalMulti` and each new listener receives the array as a series of activation values).
-	///
-	/// PERFORMANCE NOTE: for thread safety reasons, the `updater` function is always run on a *copy* of the array. Keep this copying in mind when using this function. If you need to avoid a copy, you would need to use a `class` type for `T` (so only the reference is copied) and use serialized execution `context`s for all `Signal`s handling the reference.
+	/// Appends a new `SignalMulti` to this `Signal`. The new `SignalMulti` immediately activates its antecedents. Every time a value is received, it is passed to an "updater" which creates an array of activation values and an error that will be used for any new listeners.
+	/// Consider this as an operator that allows the creation of a custom "bring-up-to-speed" value for new listeners.
 	///
 	/// - Parameters:
 	///   - initial: activation values used when *before* any incoming value is received (if you wan't to specify closed as well, use `preclosed` instead)
 	///   - context: the execution context where the `updater` will run
 	///   - updater: run for each incoming `Result<T>` to update the buffered activation values
 	/// - Returns: a buffered `SignalMulti`
-	public final func buffer(initial: Array<T> = [], context: Exec = .direct, updater: @escaping (_ bufferedValues: inout Array<T>, _ bufferedError: inout Error?, _ incoming: Result<T>) -> Void) -> SignalMulti<T> {
+	public final func customActivation(initial: Array<T> = [], context: Exec = .direct, updater: @escaping (_ cachedValues: inout Array<T>, _ cachedError: inout Error?, _ incoming: Result<T>) -> Void) -> SignalMulti<T> {
 		return SignalMulti<T>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: (initial, nil), isUserUpdated: true, dw: &dw, context: context) { (bufferedValues: inout Array<T>, bufferedError: inout Error?, incoming: Result<T>) -> (Array<T>, Error?) in
+			SignalMultiProcessor(signal: s, values: (initial, nil), userUpdated: true, alwaysActive: true, dw: &dw, context: context) { (bufferedValues: inout Array<T>, bufferedError: inout Error?, incoming: Result<T>) -> (Array<T>, Error?) in
 				let oldActivationValues = bufferedValues
 				let oldError = bufferedError
 				updater(&bufferedValues, &bufferedError, incoming)
@@ -552,9 +573,16 @@ public class Signal<T> {
 		})
 	}
 	
-	@available(*, deprecated, message:"Use buffer(initial:context:updater:) instead")
+	/// Renamed a second time to avoid confusion with the ReactiveX operator.
+	@available(*, deprecated, message:"Use customActivation(initial:context:updater:) instead")
+	public final func buffer(initial: Array<T>, context: Exec = .direct, updater: @escaping (_ activationValues: inout Array<T>, _ preclosed: inout Error?, _ result: Result<T>) -> Void) -> SignalMulti<T> {
+		return customActivation(initial: initial, context: context, updater: updater)
+	}
+	
+	/// Renamed a first time because the parameter order conflicted with other functions and `initials` was a typo.
+	@available(*, deprecated, message:"Use customActivation(initial:context:updater:) instead")
 	public final func buffer(context: Exec = .direct, initials: Array<T>, updater: @escaping (_ activationValues: inout Array<T>, _ preclosed: inout Error?, _ result: Result<T>) -> Void) -> SignalMulti<T> {
-		return buffer(initial: initials, context: context, updater: updater)
+		return customActivation(initial: initials, context: context, updater: updater)
 	}
 	
 	/// Constructs a `SignalMulti` with an array of "activation" values and a closing error.
@@ -565,7 +593,7 @@ public class Signal<T> {
 	/// - returns: an `SignalMulti`
 	public static func preclosed<S: Sequence>(values: S, error: Error = SignalError.closed) -> SignalMulti<T> where S.Iterator.Element == T {
 		return SignalMulti<T>(processor: Signal<T>().attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: (Array(values), error), isUserUpdated: false, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
+			SignalMultiProcessor(signal: s, values: (Array(values), error), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
 		})
 	}
 	
@@ -576,7 +604,7 @@ public class Signal<T> {
 	/// - returns: an `SignalMulti`
 	public static func preclosed(error: Error = SignalError.closed) -> SignalMulti<T> {
 		return SignalMulti<T>(processor: Signal<T>().attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], error), isUserUpdated: false, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
+			SignalMultiProcessor(signal: s, values: ([], error), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
 		})
 	}
 	
@@ -587,11 +615,11 @@ public class Signal<T> {
 	/// - returns: an `SignalMulti`
 	public static func preclosed(_ value: T, error: Error = SignalError.closed) -> SignalMulti<T> {
 		return SignalMulti<T>(processor: Signal<T>().attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([value], error), isUserUpdated: false, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
+			SignalMultiProcessor(signal: s, values: ([value], error), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
 		})
 	}
 	
-	/// Appends an immediately activated handler that captures any activation values from this `Signal`. The captured values can be accessed from the `SignalCapture<T>` using the `activation()` function. The `SignalCapture<T>` can then be joined to further `Signal`s using the `join(toInput:)` function on the `SignalCapture<T>`.
+	/// Appends an immediately activated handler that captures any activation values from this `Signal`. The captured values can be accessed from the `SignalCapture<T>` using the `activation()` function. The `SignalCapture<T>` can then be joined to further `Signal`s using the `join(to:)` function on the `SignalCapture<T>`.
 	///
 	/// - returns: the handler than can be used to obtain activation values and join to subsequent nodes.
 	public final func capture() -> SignalCapture<T> {
@@ -665,7 +693,7 @@ public class Signal<T> {
 		if !(self is SignalMulti<T>) {
 			var dw = DeferredWork()
 			mutex.sync {
-				_ = processor.outputAddedSuccessorInternal(self, param: nil, activationCount: nil, dw: &dw)
+				try! processor.outputAddedSuccessorInternal(self, param: nil, activationCount: nil, dw: &dw)
 			}
 			dw.runWork()
 		}
@@ -673,7 +701,7 @@ public class Signal<T> {
 	
 	// Need to close the `newInputSignal` and detach from all predecessors on deinit.
 	deinit {
-		_ = newInputSignal?.send(result: .failure(SignalError.cancelled), predecessor: nil, activationCount: 0, activated: true)
+		_ = newInputSignal?.0.send(result: .failure(SignalError.cancelled), predecessor: nil, activationCount: 0, activated: true)
 		
 		var dw = DeferredWork()
 		mutex.sync {
@@ -689,14 +717,13 @@ public class Signal<T> {
 	// - parameter dw:            required
 	//
 	// - returns: true if this `Signal` was connected to the predecessor, false otherwise
-	fileprivate final func addPreceedingInternal(_ newPreceeding: SignalPredecessor, param: Any?, dw: inout DeferredWork) -> SignalAddResult {
+	fileprivate final func addPreceedingInternal(_ newPreceeding: SignalPredecessor, param: Any?, dw: inout DeferredWork) throws {
 		preceedingCount += 1
 		let wrapped = newPreceeding.wrappedWithTimestamp(preceedingCount)
 		preceeding.insert(wrapped)
 		
-		let result = newPreceeding.outputAddedSuccessorInternal(self, param: param, activationCount: (delivery.isDisabled || preceeding.count == 1) ? Optional<Int>.none : Optional<Int>(activationCount), dw: &dw)
-		switch result {
-		case .success:
+		do {
+			try newPreceeding.outputAddedSuccessorInternal(self, param: param, activationCount: (delivery.isDisabled || preceeding.count == 1) ? Optional<Int>.none : Optional<Int>(activationCount), dw: &dw)
 			if !delivery.isDisabled, preceeding.count == 1 {
 				updateActivationInternal(andInvalidateAllPrevious: true, dw: &dw)
 				if !delivery.isSynchronous {
@@ -712,10 +739,9 @@ public class Signal<T> {
 					}
 				}
 			}
-			return result
-		default:
+		} catch {
 			preceeding.remove(wrapped)
-			return result
+			throw error
 		}
 	}
 	
@@ -727,7 +753,7 @@ public class Signal<T> {
 	fileprivate final func addPreceeding(processor: SignalPredecessor) -> Signal<T> {
 		var dw = DeferredWork()
 		mutex.sync {
-			_ = addPreceedingInternal(processor, param: nil, dw: &dw)
+			try! addPreceedingInternal(processor, param: nil, dw: &dw)
 		}
 		dw.runWork()
 		return self
@@ -846,11 +872,12 @@ public class Signal<T> {
 	/// The `itemContext` holds information uniquely used by the currently processing item so it can be read outside the mutex. This may only be called immediately before calling `blockInternal` to start a processing item (e.g. from `send` or `resume`.
 	///
 	/// - Returns: false if the `signalHandler` was `nil`, true otherwise.
-	fileprivate final func refreshItemContextInternal() -> Bool {
+	fileprivate final func refreshItemContextInternal(_ dw: inout DeferredWork) -> Bool {
 		assert(mutex.unbalancedTryLock() == false)
 		assert(holdCount == 0 && itemProcessing == false)
 		if itemContextNeedsRefresh {
 			if let h = signalHandler {
+				dw.append { [itemContext] in withExtendedLifetime(itemContext) {} }
 				itemContext = ItemContext(activationCount: activationCount, context: h.context, synchronous: delivery.isSynchronous, handler: h.handler)
 				itemContextNeedsRefresh = false
 			} else {
@@ -918,13 +945,26 @@ public class Signal<T> {
 			return SignalError.inactive
 		}
 		
-		if !refreshItemContextInternal() {
-			mutex.unbalancedUnlock()
-			return SignalError.inactive
-		}
-		
 		assert(holdCount == 0 && itemProcessing == false)
-		itemProcessing = true
+
+		if itemContextNeedsRefresh {
+			var dw = DeferredWork()
+			let hasHandler = refreshItemContextInternal(&dw)
+			if hasHandler {
+				itemProcessing = true
+			}
+			mutex.unbalancedUnlock()
+
+			// We need to be extremely careful that any previous handlers, replaced in the `refreshItemContextInternal` function are released *here* if we're going to re-enter the lock and that we've *already* acquired the `itemProcessing` Bool. There's a little bit of dancing around in this `if itemContextNeedsRefresh` block to ensure these two things are true.
+			dw.runWork()
+
+			if !hasHandler {
+				return SignalError.inactive
+			}
+			mutex.unbalancedLock()
+		} else {
+			itemProcessing = true
+		}
 		
 		mutex.unbalancedUnlock()
 		
@@ -1163,7 +1203,7 @@ public class Signal<T> {
 	// If the holdCount is zero and there are queued items, increments the hold count immediately and starts processing in the deferred work.
 	fileprivate final func resumeIfPossibleInternal(dw: inout DeferredWork) {
 		if holdCount == 0, itemProcessing == false, !queue.isEmpty {
-			if !refreshItemContextInternal() {
+			if !refreshItemContextInternal(&dw) {
 				preconditionFailure("Handler should not be nil if queue is not empty")
 			}
 			itemProcessing = true
@@ -1204,14 +1244,14 @@ public class Signal<T> {
 				}
 			}
 			resumeIfPossibleInternal(dw: &dw)
-			newInputSignal?.push(values: [SignalInput(signal: self, activationCount: activationCount)], error: nil, activationCount: 0, dw: &dw)
+			newInputSignal?.0.push(values: [SignalInput(signal: self, activationCount: activationCount)], error: nil, activationCount: 0, dw: &dw)
 		case .synchronous:
 			if preceeding.count > 0 {
 				updateActivationInternal(andInvalidateAllPrevious: false, dw: &dw)
 			}
 		case .disabled:
 			updateActivationInternal(andInvalidateAllPrevious: true, dw: &dw)
-			_ = newInputSignal?.push(values: [Optional<SignalInput<T>>.none], error: nil, activationCount: 0, dw: &dw)
+			_ = newInputSignal?.0.push(values: [Optional<SignalInput<T>>.none], error: nil, activationCount: 0, dw: &dw)
 		}
 	}
 }
@@ -1422,7 +1462,12 @@ fileprivate class SignalHandler<T> {
 		handleDeactivationInternal(dw: &dw)
 		if !alwaysActiveInternal {
 			signal.changeDeliveryInternal(newDelivery: .disabled, dw: &dw)
-			dw.append { [handler] in withExtendedLifetime(handler) {} }
+			dw.append { [handler] in
+				withExtendedLifetime(handler) {}
+				
+				// Endpoints may release themselves on deactivation so we need to keep ourselves alive until outside the lock
+				withExtendedLifetime(self) {}
+			}
 			handler = initialHandlerInternal()
 		}
 	}
@@ -1449,7 +1494,7 @@ fileprivate protocol SignalPredecessor: class {
 	func outputActivatedSuccessorInternal(_ successor: AnyObject, activationCount: Int, dw: inout DeferredWork)
 	func outputCompletedActivationSuccessorInternal(_ successor: AnyObject, dw: inout DeferredWork)
 	func outputDeactivatedSuccessorInternal(_ successor: AnyObject, dw: inout DeferredWork)
-	func outputAddedSuccessorInternal(_ successor: AnyObject, param: Any?, activationCount: Int?, dw: inout DeferredWork) -> SignalAddResult
+	func outputAddedSuccessorInternal(_ successor: AnyObject, param: Any?, activationCount: Int?, dw: inout DeferredWork) throws
 	func outputRemovedSuccessorInternal(_ successor: AnyObject, dw: inout DeferredWork)
 	func precessorsSuccessorInternal(contains: SignalPredecessor) -> Bool
 	func wrappedWithTimestamp(_ timestamp: Int) -> OrderedSignalPredecessor
@@ -1642,7 +1687,7 @@ fileprivate class SignalProcessor<T, U>: SignalHandler<T>, SignalPredecessor {
 	///
 	/// - parameter param: usually a closure.
 	fileprivate func handleParamFromSuccessor(param: Any) {
-		preconditionFailure()
+		fatalError()
 	}
 	
 	/// Typical processors *don't* need to check their predecessors for a loop (only junctions do)
@@ -1658,15 +1703,15 @@ fileprivate class SignalProcessor<T, U>: SignalHandler<T>, SignalPredecessor {
 	/// - parameter dw:              required
 	///
 	/// - returns: true if this output was accepted, false otherwise
-	fileprivate final func outputAddedSuccessorInternal(_ successor: AnyObject, param: Any?, activationCount: Int?, dw: inout DeferredWork) -> SignalAddResult {
-		var result: SignalAddResult = .success
+	fileprivate final func outputAddedSuccessorInternal(_ successor: AnyObject, param: Any?, activationCount: Int?, dw: inout DeferredWork) throws {
+		var error: SignalJoinError<T>? = nil
 		runSuccesorAction {
 			guard outputs.isEmpty || multipleOutputsPermitted else {
-				result = .replaced
+				error = SignalJoinError<T>.duplicate(nil)
 				return
 			}
 			guard let sccr = successor as? Signal<U> else {
-				result = .cancelled
+				error = SignalJoinError<T>.cancelled
 				return
 			}
 			
@@ -1674,7 +1719,9 @@ fileprivate class SignalProcessor<T, U>: SignalHandler<T>, SignalPredecessor {
 				// Don't need to traverse sortedPreceeding (unsorted is fine for an ancestor check)
 				for p in signal.preceeding {
 					if p.base.precessorsSuccessorInternal(contains: predecessor) {
-						result = .loop
+						// Just throw a dummy error here and trigger the preconditionFailure outside the lock (otherwise precondition catching tests may deadlock).
+						error = SignalJoinError<T>.cancelled
+						dw.append { preconditionFailure("Signals must not be joined in a loop.") }
 						return
 					}
 				}
@@ -1692,7 +1739,9 @@ fileprivate class SignalProcessor<T, U>: SignalHandler<T>, SignalPredecessor {
 				}
 			}
 		}
-		return result
+		if let e = error {
+			throw e
+		}
 	}
 	
 	/// Called when a successor is removed
@@ -1735,22 +1784,24 @@ fileprivate class SignalMultiProcessor<T>: SignalProcessor<T, T> {
 	let updater: Updater?
 	var activationValues: Array<T>
 	var preclosed: Error?
-	let isUserUpdated: Bool
+	let userUpdated: Bool
+	let alwaysActive: Bool
 	
 	/// Rather than using different subclasses for each of the "multi" `Signal`s, this one subclass is used for all. However, that requires a few different parameters to enable different behaviors.
-	init(signal: Signal<T>, values: (Array<T>, Error?), isUserUpdated: Bool, dw: inout DeferredWork, context: Exec, updater: Updater?) {
+	init(signal: Signal<T>, values: (Array<T>, Error?), userUpdated: Bool, alwaysActive: Bool, dw: inout DeferredWork, context: Exec, updater: Updater?) {
 		precondition((values.1 == nil && values.0.isEmpty) || updater != nil, "Non empty activation values requires always active.")
 		self.updater = updater
 		self.activationValues = values.0
 		self.preclosed = values.1
-		self.isUserUpdated = isUserUpdated
+		self.userUpdated = userUpdated
+		self.alwaysActive = alwaysActive
 		super.init(signal: signal, dw: &dw, context: context)
 	}
 	
-	/// Multicast is not preactivated but all other types are
+	/// Multicast and continuousWhileActive are not preactivated but all others are not.
 	fileprivate override var alwaysActiveInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
-		return updater != nil
+		return alwaysActive
 	}
 	
 	/// Multiprocessor can handle multiple outputs
@@ -1786,7 +1837,7 @@ fileprivate class SignalMultiProcessor<T>: SignalProcessor<T, T> {
 		return { [weak self] r in
 			if let s = self {
 				if let u = s.updater {
-					if s.isUserUpdated {
+					if s.userUpdated {
 						var values = [T]()
 						var error: Error?
 						
@@ -1994,7 +2045,7 @@ fileprivate final class SignalTransformerWithState<T, U, S>: SignalProcessor<T, 
 		/// Every time the handler is recreated, the `state` value is initialized from the `initialState`.
 		var state = initialState
 		
-		return { [userHandler] r in
+		return { [userHandler, weak outputSignal] r in
 			userHandler(&state, r, next)
 			
 			if !isKnownUniquelyReferenced(&next), let s = next.blockable as? SignalTransformerWithState<T, U, S> {
@@ -2004,7 +2055,9 @@ fileprivate final class SignalTransformerWithState<T, U, S>: SignalProcessor<T, 
 				let n = next
 				s.sync {
 					n.needUnblock = true
-					next = SignalNext<U>(signal: outputSignal, predecessor: s, activationCount: ac, activated: activated, blockable: s)
+					if let os = outputSignal {
+						next = SignalNext<U>(signal: os, predecessor: s, activationCount: ac, activated: activated, blockable: s)
+					}
 					s.signal.itemContextNeedsRefresh = true
 				}
 				withExtendedLifetime(n) {}
@@ -2029,7 +2082,7 @@ fileprivate enum SignalEndpointReferenceLoop {
 /// This class is instantiated by calling `subscribe` on any `Signal`.
 public final class SignalEndpoint<T>: SignalHandler<T>, Cancellable {
 	private let userHandler: (Result<T>) -> Void
-	fileprivate var referenceLoop = SignalEndpointReferenceLoop.noLoop
+	private var closed = false
 	
 	/// Constructor called from `subscribe`
 	fileprivate init(signal: Signal<T>, dw: inout DeferredWork, context: Exec, handler: @escaping (Result<T>) -> Void) {
@@ -2043,54 +2096,30 @@ public final class SignalEndpoint<T>: SignalHandler<T>, Cancellable {
 		return { [userHandler] r in userHandler(r) }
 	}
 	
+	/// Deactivation closes the endpoint
+	fileprivate override func handleDeactivationInternal(dw: inout DeferredWork) {
+		closed = true
+	}
+	
 	/// A `SignalEndpoint` is active until closed (receives a `failure` signal)
 	fileprivate override var alwaysActiveInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
-		if case .closed = self.referenceLoop {
+		if closed {
 			return false
 		} else {
 			return true
 		}
 	}
 	
-	/// Deactivation closes the endpoint
-	fileprivate override func handleDeactivationInternal(dw: inout DeferredWork) {
-		self.referenceLoop = .closed
-		dw.append { withExtendedLifetime(self) {} }
-	}
-	
 	/// A simple test for whether this endpoint has received an error, yet. Not generally needed (responding to state changes is best done through the handler function itself).
 	public var isClosed: Bool {
-		var result = true
-		sync {
-			if case .closed = self.referenceLoop {
-			} else {
-				result = false
-			}
-		}
-		return result
+		return sync { closed }
 	}
 	
 	public func cancel() {
 		var dw = DeferredWork()
-		sync {
-			if case .closed = self.referenceLoop {
-			} else {
-				deactivateInternal(dw: &dw)
-			}
-		}
+		sync { if !closed { deactivateInternal(dw: &dw) } }
 		dw.runWork()
-	}
-	
-	/// Creates a reference counted loop from this `SignalEndpoint` to itself so it will not be released until the signal closes.
-	///
-	/// WARNING: AVOID this in most cases, it is for special cases where you *know* the signal will be closed at the other end and you *can't* otherwise maintain the lifetime at the listener end. if the signal graph does not send a `Result.failure`, THIS WILL BE A MEMORY LEAK.
-	public func keepAlive() {
-		sync {
-			if case .noLoop = self.referenceLoop {
-				self.referenceLoop = .loop(self)
-			}
-		}
 	}
 }
 
@@ -2113,46 +2142,31 @@ fileprivate final class SignalCombiner<T, U>: SignalProcessor<T, U> {
 	}
 }
 
-private enum SignalAddResult {
-	case cancelled
-	case success
-	case replaced
-	case loop
-}
-
-/// Attempts to join a `SignalInput` to a joinable handler (either `SignalJunction` or `SignalCapture`) can fail two different ways or it can succeed.
-/// - cancelled: The `SignalInput` wasn't the active input for its `Signal` so joining failed
-/// - replaced(`SignalInput<T>`): the joinable handler was found to already have a successor connected - must have occurred on another thread between the separate "disconnect" and "join" steps performed on this thread (the old `SignalInput` was invalidated during this process so this case contains the new `SignalInput)
-/// - loop(SignalInput<T>): the `SignalInput` was a predecessor of the joinable handler so joining would have formed a loop in the graph (the old `SignalInput` was invalidated during this process so this case contains the new `SignalInput)
-/// - succeeded: The join succeeded
-public enum SignalJoinError<T>: Error {
-	case cancelled
-	case duplicate(SignalInput<T>)
-	case loop(SignalInput<T>)
-}
-
 /// Common implementation of join behavior used by `SignalJunction` and `SignalCapture`.
-fileprivate func joinFunction<T>(processor: SignalProcessor<T, T>, disconnect: () -> SignalInput<T>?, toInput: SignalInput<T>, optionalErrorHandler: Any?) throws {
+fileprivate func joinFunction<T>(processor: SignalProcessor<T, T>, disconnect: () -> SignalInput<T>?, to: SignalInput<T>, optionalErrorHandler: Any?) throws {
 	var dw = DeferredWork()
 	defer { dw.runWork() }
-	if let nextSignal = toInput.signal {
-		try nextSignal.mutex.sync { () throws in
-			guard toInput.activationCount == nextSignal.activationCount else {
+	if let nextSignal = to.signal {
+		try nextSignal.mutex.sync { () throws -> () in
+			guard to.activationCount == nextSignal.activationCount else {
 				throw SignalJoinError<T>.cancelled
 			}
 			nextSignal.removeAllPreceedingInternal(dw: &dw)
-			let result = nextSignal.addPreceedingInternal(processor, param: optionalErrorHandler, dw: &dw)
-			switch result {
-			case .success: return
-			case .loop: throw SignalJoinError.loop(SignalInput<T>(signal: nextSignal, activationCount: nextSignal.activationCount))
-			case .replaced: throw SignalJoinError.duplicate(SignalInput<T>(signal: nextSignal, activationCount: nextSignal.activationCount))
-			case .cancelled: throw SignalJoinError<T>.cancelled
+			do {
+				try nextSignal.addPreceedingInternal(processor, param: optionalErrorHandler, dw: &dw)
+			} catch {
+				switch error {
+				case SignalJoinError<T>.duplicate: throw SignalJoinError<T>.duplicate(SignalInput<T>(signal: nextSignal, activationCount: nextSignal.activationCount))
+				default: throw SignalJoinError<T>.cancelled
+				}
 			}
 		}
+	} else {
+		throw SignalJoinError<T>.cancelled
 	}
 }
 
-/// A junction is a point in the signal graph that can be disconnected and reconnected at any time. Constructed by calling `join(toInput:...)` or `junction()` on an `Signal`.
+/// A junction is a point in the signal graph that can be disconnected and reconnected at any time. Constructed by calling `join(to:...)` or `junction()` on an `Signal`.
 public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 	private var disconnectOnError: ((SignalJunction<T>, Error, SignalInput<T>) -> ())? = nil
 	
@@ -2213,37 +2227,28 @@ public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 	
 	/// Invokes `disconnect` on self before attemping to join this junction to a successor, identified by its `SignalInput`.
 	///
-	/// - parameter toInput: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalJunction` will still be `disconnect`ed.
+	/// - parameter to: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalJunction` will still be `disconnect`ed.
 	///
-	/// - returns: a tuple where the first element is the `SignalInput` result from calling `disconnect` on self. The second element will be:
-	///	* .cancelled – if the `SignalInput` wasn't the active input for its `Signal`
-	///	* .failed(`SignalError`, `SignalInput<T>`): The connection attempted failed for one of two reasons:
-	///		1. SignalError.duplicate (the joinable handler was found to already have a successor connected - must have occurred on another thread between the separate "disconnect" and "join" steps performed on this thread)
-	///		2. SignalError.loop (the `SignalInput` was a predecessor of the joinable handler so joining would have formed a loop in the graph)
-	///	The error is the first element of the tuple and the new `SignalInput` is the second (the old `SignalInput` was invalidated during this process).
-	///	* .succeeded – the join succeeded
-	public func join(toInput: SignalInput<T>) throws {
-		try joinFunction(processor: self, disconnect: self.disconnect, toInput: toInput, optionalErrorHandler: nil)
+	/// - returns Void but may throw a `SignalJoinError` (see that type for possible cases)
+	public func join(to: SignalInput<T>) throws {
+		try joinFunction(processor: self, disconnect: self.disconnect, to: to, optionalErrorHandler: nil)
 	}
 	
 	/// Invokes `disconnect` on self before attemping to join this junction to a successor, identified by its `SignalInput`.
 	///
-	/// - parameter toInput: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalJunction` will still be `disconnect`ed.
-	/// - parameter onError: if nil, errors from self will be passed through to `toInput`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalJunction` and the input created by calling `disconnect` on it.
+	/// - parameter to: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalJunction` will still be `disconnect`ed.
+	/// - parameter onError: if nil, errors from self will be passed through to `to`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalJunction` and the input created by calling `disconnect` on it.
 	///
-	/// - returns: a tuple where the first element is the `SignalInput` result from calling `disconnect` on self. The second element will be:
-	///	* .cancelled – if the `SignalInput` wasn't the active input for its `Signal`
-	///	* .replaced(SignalInput<T>) - Upon attempting to connect the successor to self, self was found to already have a successor connected (must have occurred on another thread between the separate "disconnect" and "join" steps performed during this function). The `toInput` parameter has been invalidated and the new input is contained in this case value.
-	///	* .succeeded – the join succeeded
-	public func join(toInput: SignalInput<T>, onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) throws {
-		try joinFunction(processor: self, disconnect: self.disconnect, toInput: toInput, optionalErrorHandler: onError)
+	/// - returns Void but may throw a `SignalJoinError` (see that type for possible cases)
+	public func join(to: SignalInput<T>, onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) throws {
+		try joinFunction(processor: self, disconnect: self.disconnect, to: to, optionalErrorHandler: onError)
 	}
 	
 	/// Disconnect and reconnect to the same input, to deliberately deactivate and reactivate. If `disconnect` returns `nil`, no further action will be taken. Any error attempting to reconnect will be sent to the input.
 	public func rejoin() {
 		if let input = disconnect() {
 			do {
-				try join(toInput: input)
+				try join(to: input)
 			} catch {
 				input.send(result: .failure(error))
 			}
@@ -2255,7 +2260,7 @@ public class SignalJunction<T>: SignalProcessor<T, T>, Cancellable {
 	public func rejoin(onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) {
 		if let input = disconnect() {
 			do {
-				try join(toInput: input, onError: onError)
+				try join(to: input, onError: onError)
 			} catch {
 				input.send(result: .failure(error))
 			}
@@ -2270,7 +2275,7 @@ struct SignalCaptureParam<T> {
 
 /// A "capture" handler separates activation signals (those sent immediately on connection) from normal signals. This allows activation signals to be handled separately or removed from the stream entirely.
 /// NOTE: this handler *blocks* delivery between capture and connecting to the output. Signals sent in the meantime are queued.
-public final class SignalCapture<T>: SignalProcessor<T, T> {
+public final class SignalCapture<T>: SignalProcessor<T, T>, Cancellable {
 	private var sendAsNormal: Bool = false
 	private var capturedError: Error? = nil
 	private var capturedValues: [T] = []
@@ -2410,6 +2415,10 @@ public final class SignalCapture<T>: SignalProcessor<T, T> {
 		withExtendedLifetime(previous) {}
 		return result
 	}
+
+	public func cancel() {
+		_ = self.disconnect()
+	}
 	
 	/// The `disconnectOnError` needs to be set inside the mutex, if-and-only-if a successor connects successfully. To allow this to work, the desired `disconnectOnError` function is passed into this function via the `outputAddedSuccessorInternal` called from `addPreceedingInternal` in the `joinFunction`.
 	fileprivate override func handleParamFromSuccessor(param: Any) {
@@ -2421,42 +2430,51 @@ public final class SignalCapture<T>: SignalProcessor<T, T> {
 	
 	/// Invokes `disconnect` on self before attemping to join this junction to a successor, identified by its `SignalInput`.
 	///
-	/// - parameter toInput: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalCapture` will still be `disconnect`ed.
+	/// - parameter to: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalCapture` will still be `disconnect`ed.
 	/// - parameter resend: if true, captured values are sent to the new output as the first values in the stream, otherwise, captured values are not sent (default is false)
 	///
-	/// - returns: a tuple where the first element is the `SignalInput` result from calling `disconnect` on self. The second element will be:
-	///	* .cancelled – if the `SignalInput` wasn't the active input for its `Signal`
-	///	* .replaced(SignalInput<T>) - Upon attempting to connect the successor to self, self was found to already have a successor connected (must have occurred on another thread between the separate "disconnect" and "join" steps performed during this function). The `toInput` parameter has been invalidated and the new input is contained in this case value.
-	///	* .succeeded – the join succeeded
-	public func join(toInput: SignalInput<T>, resend: Bool = false) throws {
+	/// - returns Void but may throw a `SignalJoinError` (see that type for possible cases)
+	public func join(to: SignalInput<T>, resend: Bool = false) throws {
 		let param = SignalCaptureParam<T>(sendAsNormal: resend, disconnectOnError: nil)
-		try joinFunction(processor: self, disconnect: self.disconnect, toInput: toInput, optionalErrorHandler: param)
+		try joinFunction(processor: self, disconnect: self.disconnect, to: to, optionalErrorHandler: param)
 	}
 	
 	/// Invokes `disconnect` on self before attemping to join this junction to a successor, identified by its `SignalInput`.
 	///
-	/// - parameter toInput: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalCapture` will still be `disconnect`ed.
+	/// - parameter to: used to identify an `Signal`. If this `SignalInput` is not the active input for its `Signal`, then no join attempt will occur (although this `SignalCapture` will still be `disconnect`ed.
 	/// - parameter resend: if true, captured values are sent to the new output as the first values in the stream, otherwise, captured values are not sent (default is false)
-	/// - parameter onError: if nil, errors from self will be passed through to `toInput`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalCapture` and the input created by calling `disconnect` on it.
+	/// - parameter onError: if nil, errors from self will be passed through to `to`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalCapture` and the input created by calling `disconnect` on it.
 	///
-	/// - returns: a tuple where the first element is the `SignalInput` result from calling `disconnect` on self. The second element will be:
-	///	* .cancelled – if the `SignalInput` wasn't the active input for its `Signal`
-	///	* .replaced(SignalInput<T>) - Upon attempting to connect the successor to self, self was found to already have a successor connected (must have occurred on another thread between the separate "disconnect" and "join" steps performed during this function). The `toInput` parameter has been invalidated and the new input is contained in this case value.
-	///	* .succeeded – the join succeeded
-	public func join(toInput: SignalInput<T>, resend: Bool = false, onError: @escaping (SignalCapture<T>, Error, SignalInput<T>) -> ()) throws {
+	/// - returns Void but may throw a `SignalJoinError` (see that type for possible cases)
+	public func join(to: SignalInput<T>, resend: Bool = false, onError: @escaping (SignalCapture<T>, Error, SignalInput<T>) -> ()) throws {
 		let param = SignalCaptureParam<T>(sendAsNormal: resend, disconnectOnError: onError)
-		try joinFunction(processor: self, disconnect: self.disconnect, toInput: toInput, optionalErrorHandler: param)
+		try joinFunction(processor: self, disconnect: self.disconnect, to: to, optionalErrorHandler: param)
 	}
 	
+	/// Appends a `SignalEndpoint` listener to the value emitted from this `SignalCapture`. The endpoint will resume the stream interrupted by the `SignalCapture`.
+	///
+	/// - Parameters:
+	///   - resend: if true, captured values are sent to the new output as the first values in the stream, otherwise, captured values are not sent (default is false)
+	///   - context: the `Exec` context used to invoke the `handler`
+	///   - handler: the function invoked for each received `Result`
+	/// - returns: the created `SignalEndpoint`
 	public func subscribe(resend: Bool = false, context: Exec = .direct, handler: @escaping (Result<T>) -> Void) -> SignalEndpoint<T> {
 		let (input, output) = Signal<T>.create()
-		try! join(toInput: input, resend: resend)
+		try! join(to: input, resend: resend)
 		return output.subscribe(context: context, handler: handler)
 	}
 	
+	/// Appends a `SignalEndpoint` listener to the value emitted from this `SignalCapture`. The endpoint will resume the stream interrupted by the `SignalCapture`.
+	///
+	/// - Parameters:
+	///   - resend: if true, captured values are sent to the new output as the first values in the stream, otherwise, captured values are not sent (default is false)
+	///   - onError: if nil, errors from self will be passed through to `to`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalCapture` and the input created by calling `disconnect` on it.
+	///   - context: the `Exec` context used to invoke the `handler`
+	///   - handler: the function invoked for each received `Result`
+	/// - returns: the created `SignalEndpoint`
 	public func subscribe(resend: Bool = false, onError: @escaping (SignalCapture<T>, Error, SignalInput<T>) -> (), context: Exec = .direct, handler: @escaping (Result<T>) -> Void) -> SignalEndpoint<T> {
 		let (input, output) = Signal<T>.create()
-		try! join(toInput: input, resend: resend, onError: onError)
+		try! join(to: input, resend: resend, onError: onError)
 		return output.subscribe(context: context, handler: handler)
 	}
 }
@@ -2513,7 +2531,7 @@ fileprivate class SignalMergeProcessor<T>: SignalProcessor<T, T> {
 }
 
 /// A merge set allows multiple `Signal`s of the same type to dynamically connect to a single output `Signal`. A merge set is analagous to a `SignalInput` in that it controls the input to a `Signal` but instead of controlling it by sending signals, it controls by connecting predecessors.
-public class SignalMergeSet<T> {
+public class SignalMergeSet<T>: Cancellable {
 	fileprivate weak var signal: Signal<T>?
 	fileprivate init(signal: Signal<T>) {
 		self.signal = signal
@@ -2524,14 +2542,15 @@ public class SignalMergeSet<T> {
 	/// - parameter source:             the predecessor
 	/// - parameter sourceClosesOutput: if true, then errors sent via this `Signal` will pass through to the output, closing the output. If false, then if this source sends an error, it will be removed from the merge set without the error being sent through to the output.
 	/// - parameter removeOnDeactivate: if true, then when the output is deactivated, this source will be removed from the merge set. If false, then the source will remain connected through deactivation.
-	public func add(_ source: Signal<T>, closesOutput: Bool = false, removeOnDeactivate: Bool = false) {
-		guard let sig = signal else { return }
+	/// - returns Void but may throw a `SignalJoinError` (see that type for possible cases)
+	public func add(_ source: Signal<T>, closesOutput: Bool = false, removeOnDeactivate: Bool = false) throws {
+		guard let sig = signal else { throw SignalJoinError<T>.cancelled }
 		let processor = source.attach { (s, dw) -> SignalMergeProcessor<T> in
 			SignalMergeProcessor<T>(signal: s, sourceClosesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate, mergeSet: self, dw: &dw)
 		}
 		var dw = DeferredWork()
-		sig.mutex.sync {
-			_ = sig.addPreceedingInternal(processor, param: nil, dw: &dw)
+		try sig.mutex.sync {
+			try sig.addPreceedingInternal(processor, param: nil, dw: &dw)
 		}
 		dw.runWork()
 	}
@@ -2555,9 +2574,40 @@ public class SignalMergeSet<T> {
 		dw.runWork()
 	}
 	
-	deinit {
+	public func input(closesOutput: Bool = false, removeOnDeactivate: Bool = false) -> SignalInput<T> {
+		return Signal<T>.create { s -> () in
+			_ = try? self.add(s, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
+		}.input
+	}
+	
+	public func cancel() {
 		guard let sig = signal else { return }
 		_ = sig.send(result: .failure(SignalError.cancelled), predecessor: nil, activationCount: sig.activationCount, activated: true)
+	}
+	
+	deinit {
+		cancel()
+	}
+}
+
+extension Signal {
+	/// Joins this `Signal` to a destination `SignalMergeSet`
+	///
+	/// - Parameters:
+	///   - to: the destination
+	///   - closesOutput: whether errors from this `Signal` should be passed through to the `SignalMergeSet` output.
+	///   - removeOnDeactivate: whether deactivate should disconnect this `Signal` from the `SignalMergeSet`.
+	/// - Throws: a `SignalJoinError` if the connection is not made (see that type for details)
+	public final func join(to: SignalMergeSet<T>, closesOutput: Bool = false, removeOnDeactivate: Bool = false) throws {
+		try to.add(self, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
+	}
+
+	public final func cancellableJoin(to: SignalMergeSet<T>, closesOutput: Bool = false, removeOnDeactivate: Bool = false) throws -> Cancellable {
+		try to.add(self, closesOutput: closesOutput, removeOnDeactivate: removeOnDeactivate)
+		return OnDelete { [weak to, weak self] in
+			guard let t = to, let s = self else { return }
+			t.remove(s)
+		}
 	}
 }
 
@@ -2578,9 +2628,9 @@ fileprivate enum SignalDelivery {
 /// A special set of errors that may be sent through the stream (or returned from `send` functions) to indicate specific close conditions
 ///
 /// - closed:    indicates the end-of-stream was reached normally
-/// - inactive:  the signal graph is not activated and the signal was not sent (connect endpoints to activate)
+/// - cancelled: Sent through the graph when an active `SignalInput`, `SignalJunction` or `SignalMergeSet` is cancelled or a `SignalInput` is released while active. May also be returned from `send` functions when the sender is no longer the "active" sender for the destination `Signal` (the graph has deactivated, joined to something else or released).
+/// - inactive:  the signal graph is not activated (no endpoints in the graph) and the Result was not sent
 /// - duplicate: when attempts to add multiple listeners to non-multi `Signals` occurs, the subsequent attempts are instead connected to a separate, pre-closed `Signal` that sends this error.
-/// - cancelled: returned from `send` functions when the sender is no longer the "active" sender for the destination `Signal`. Sent through a graph when an active `SignalInput` is released.
 /// - timeout:   used by some utility functions to indicate a time limit has expired
 public enum SignalError: Error {
 	case closed
@@ -2588,6 +2638,14 @@ public enum SignalError: Error {
 	case duplicate
 	case cancelled
 	case timeout
+}
+
+/// Attempts to join a `SignalInput` to a joinable handler (`SignalMergeSet`, `SignalJunction` or `SignalCapture`) can fail in two different ways.
+/// - cancelled: the destination `SignalInput`/`SignalMergeSet` was no longer the active input for its `Signal` (either its `Signal` is joined to something else or `Signal` has been deactivated, invalidating old inputs)
+/// - duplicate(`SignalInput<T>`): the source `Signal` already had an output connected and doesn't support multiple outputs so the join failed. If the join destination was a `SignalInput` then that `SignalInput` was consumed by the attempt so the associated value will be a new `SignalInput` replacing the old one. If the join destination was a `SignalMergeSet`, the associated value will be `nil`.
+public enum SignalJoinError<T>: Error {
+	case cancelled
+	case duplicate(SignalInput<T>?)
 }
 
 /// Used by the Signal<T>.combine(second:context:processor:) method

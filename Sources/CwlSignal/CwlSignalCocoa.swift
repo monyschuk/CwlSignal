@@ -26,10 +26,6 @@ import CwlUtils
 
 /// Instances of `SignalActionTarget` can be used as the "target" of Cocoa "target-action" events and the result will be emitted as a signal.
 /// Instance of this class are owned by the output `signal` so if you're holding onto the signal, you can drop references to this class itself.
-///
-/// WARNING: when this class is `deinit`d, the `target` will likely be set to `nil` (since most target/action senders use a `weak` target). However, there are two points to be aware of:
-///	1. The `action` on the sender will not be set to `nil` so the sender may try to send to the first responder. This class uses an unusual selector name ("cwlSignalAction") so this is unlikely to be implemented by a first responder but it's something to consider.
-///	2. Some senders (e.g. `ABPeoplePickerView`) use `unowned` targets, not `weak`, so their target must be manually set to `nil`. This lifecycle management should be tied to the output signal in some way to ensure the target is correctly set to `nil` if the signal (and therefore this instance) are `deinit`d.
 open class SignalActionTarget: NSObject {
 	private var signalInput: SignalInput<Any?>? = nil
 	
@@ -45,8 +41,8 @@ open class SignalActionTarget: NSObject {
 		
 		// Otherwise, create a new one
 		let (i, s) = Signal<Any?>.create { s in
-			// Instead of using a `continuous` transform, use a `buffer` to do the same thing while capturing `self` so that we're owned by the signal.
-			s.buffer { (b: inout Array<Any?>, e: inout Error?, r: Result<Any?>) in
+			// Instead of using a `continuous` transform, use a `customActivation` to do the same thing while capturing `self` so that we're owned by the signal.
+			s.customActivation { (b: inout Array<Any?>, e: inout Error?, r: Result<Any?>) in
 				withExtendedLifetime(self) {}
 				switch r {
 				case .success(let v):
@@ -65,7 +61,7 @@ open class SignalActionTarget: NSObject {
 	/// Receiver function for the target-action events
 	///
 	/// - Parameter sender: typical target-action "sender" parameter
-	@objc public func cwlSignalAction(_ sender: Any?) {
+	@IBAction public func cwlSignalAction(_ sender: Any?) {
 		_ = signalInput?.send(value: sender)
 	}
 	
@@ -87,8 +83,8 @@ open class SignalDoubleActionTarget: SignalActionTarget {
 		
 		// Otherwise, create a new one
 		let (i, s) = Signal<Any?>.create { s in
-			// Instead of using a `continuous` transform, use a `buffer` to do the same thing while capturing `self` so that we're owned by the signal.
-			s.buffer { (b: inout Array<Any?>, e: inout Error?, r: Result<Any?>) in
+			// Instead of using a `continuous` transform, use a `customActivation` to do the same thing while capturing `self` so that we're owned by the signal.
+			s.customActivation { (b: inout Array<Any?>, e: inout Error?, r: Result<Any?>) in
 				withExtendedLifetime(self) {}
 				switch r {
 				case .success(let v):
@@ -104,7 +100,7 @@ open class SignalDoubleActionTarget: SignalActionTarget {
 		return s
 	}
 
-	@objc public func cwlSignalSecondAction(_ sender: Any?) {
+	@IBAction public func cwlSignalSecondAction(_ sender: Any?) {
 		_ = secondInput?.send(value: sender)
 	}
 	public var secondSelector: Selector { return #selector(SignalDoubleActionTarget.cwlSignalSecondAction(_:)) }
@@ -167,9 +163,9 @@ extension Signal {
 /// - Returns: a signal which emits the observation results
 public func signalFromNotifications(center: NotificationCenter = NotificationCenter.default, name: Notification.Name? = nil, object: AnyObject? = nil) -> Signal<Notification> {
 	var observerObject: NSObjectProtocol?
-	return Signal<Notification>.generate { input in
-		if let i = input {
-			observerObject = center.addObserver(forName: name, object: object, queue: nil) { n in
+	return Signal<Notification>.generate { [weak object] input in
+		if let i = input, let o = object {
+			observerObject = center.addObserver(forName: name, object: o, queue: nil) { n in
 				i.send(value: n)
 			}
 		} else {

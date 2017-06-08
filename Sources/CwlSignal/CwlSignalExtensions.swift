@@ -53,16 +53,62 @@ extension SignalSender {
 }
 
 extension Signal {
+	/// A version of `generate` that retains the latest `input` so it doesn't automatically close the signal when the input falls out of scope. This enables a generator that never closes (lives until deactivation).
+	///
+	/// - Parameters:
+	/// - parameter context:          the `activationChange` will be invoked in this context
+	/// - parameter activationChange: receives inputs on activation and nil on each deactivation
+	/// - returns: the constructed `Signal`
+	public static func retainedGenerate(context: Exec = .direct, activationChange: @escaping (SignalInput<T>?) -> Void) -> Signal<T> {
+		var latestInput: SignalInput<T>? = nil
+		return .generate(context: context) { input in
+			latestInput = input
+			withExtendedLifetime(latestInput) {}
+			activationChange(input)
+		}
+	}
+
 	/// A convenience version of `subscribe` that only invokes the `processor` on `Result.success`
 	///
 	/// - Parameters:
 	///   - context: the execution context where the `processor` will be invoked
-	///   - processor: will be invoked with each value received
+	///   - handler: will be invoked with each value received
 	/// - Returns: the `SignalEndpoint` created by this function
 	public func subscribeValues(context: Exec = .direct, handler: @escaping (ValueType) -> Void) -> SignalEndpoint<ValueType> {
 		return subscribe(context: context) { r in
 			if case .success(let v) = r {
 				handler(v)
+			}
+		}
+	}
+	
+	/// A version of `subscribe` that creates a reference counted loop to the `SignalEndpoint`, keeping the signal graph alive. Unlike a typical `subscribe` handler (which returns `Void`), this handler returns a `Bool` – the the `Bool` is false, the reference counted loop is broken. The reference counted loop is also broken if the signal closes.
+	///
+	/// - Parameters:
+	///   - context: the execution context where the `processor` will be invoked
+	///   - handler: will be invoked with each value received and if returns `false`, the endpoint will be cancelled and released
+	public func subscribeAndKeepAlive(context: Exec = .direct, handler: @escaping (Result<ValueType>) -> Bool) {
+		var endpoint: SignalEndpoint<T>? = nil
+		endpoint = subscribe(context: context) { r in
+			withExtendedLifetime(endpoint) {}
+			if !handler(r) || r.isError {
+				endpoint?.cancel()
+				endpoint = nil
+			}
+		}
+	}
+	
+	/// A version of `subscribe` that creates a reference counted loop to the `SignalEndpoint`, keeping the signal graph alive. Unlike a typical `subscribe` handler (which returns `Void`), this handler returns a `Bool` – the the `Bool` is false, the reference counted loop is broken. The reference counted loop is also broken if the signal closes.
+	///
+	/// - Parameters:
+	///   - context: the execution context where the `processor` will be invoked
+	///   - handler: will be invoked with each value received and if returns `false`, the endpoint will be cancelled and released
+	public func subscribeValuesAndKeepAlive(context: Exec = .direct, handler: @escaping (ValueType) -> Bool) {
+		subscribeAndKeepAlive(context: context) { r in
+			if case .success(let v) = r {
+				return handler(v)
+			} else {
+				return false
 			}
 		}
 	}
@@ -96,8 +142,8 @@ extension Signal {
 	/// - parameter processor:       performs work with values from this `Signal` and the `SignalMergeSet` used for output.
 	///
 	/// - returns: output of the merge set
-	public func transformFlatten<U>(context: Exec = .direct, closesImmediate: Bool = false, processor: @escaping (T, SignalMergeSet<U>) -> ()) -> Signal<U> {
-		return transformFlatten(withState: (), closesImmediate: closesImmediate, context: context, processor: { (state: inout (), value: T, mergeSet: SignalMergeSet<U>) in processor(value, mergeSet) })
+	public func transformFlatten<U>(context: Exec = .direct, closesImmediate: Bool = false, _ processor: @escaping (T, SignalMergeSet<U>) -> ()) -> Signal<U> {
+		return transformFlatten(withState: (), closesImmediate: closesImmediate, context: context, { (state: inout (), value: T, mergeSet: SignalMergeSet<U>) in processor(value, mergeSet) })
 	}
 	
 	/// A signal transform function that, instead of sending values to a `SignalNext`, outputs entire signals to a `SignalMergeSet`. The output of the merge set is then the result from this function.
@@ -110,8 +156,8 @@ extension Signal {
 	/// - parameter processor:       performs work with values from this `Signal` and the `SignalMergeSet` used for output.
 	///
 	/// - returns: output of the merge set
-	public func transformFlatten<S, U>(withState initialState: S, closesImmediate: Bool = false, context: Exec = .direct, processor: @escaping (inout S, T, SignalMergeSet<U>) -> ()) -> Signal<U> {
-		let (mergeSet, result) = Signal<U>.mergeSetAndSignal()
+	public func transformFlatten<S, U>(withState initialState: S, closesImmediate: Bool = false, context: Exec = .direct, _ processor: @escaping (inout S, T, SignalMergeSet<U>) -> ()) -> Signal<U> {
+		let (mergeSet, result) = Signal<U>.createMergeSet()
 		var closeError: Error? = nil
 		let closeSignal = transform(withState: initialState, context: context) { (state: inout S, r: Result<T>, n: SignalNext<U>) in
 			switch r {
@@ -123,7 +169,7 @@ extension Signal {
 		}
 		
 		// Keep the merge set alive at least as long as self
-		mergeSet.add(closeSignal, closesOutput: closesImmediate)
+		_ = try? mergeSet.add(closeSignal, closesOutput: closesImmediate)
 		
 		// On close, emit the error from self rather than the error from the merge set (which is usually `SignalError.cancelled` when `closesImmediate` is false.
 		return result.transform(withState: nil) { (onDelete: inout OnDelete?, r: Result<U>, n: SignalNext<U>) in
@@ -173,45 +219,155 @@ extension Signal {
 				}
 			}
 
-			mergeSet.add(prefixedInnerSignal)
+			_ = try? mergeSet.add(prefixedInnerSignal)
 			state.index += 1
-		}
-	}
-
-	/// A pairing of the map and buffer operations, connected so that the buffer can be updated in the same closure as the map is performed. For simplicity, the buffer is restricted to an optional value instead of an array.
-	///
-	/// NOTE: the buffer *copies* the buffered value an additional time. If this copy is a problem, you would need to box the value.
-	///
-	/// - Parameters:
-	///   - initial: activation values used when *before* any incoming value is received (if you wan't to specify closed as well, use `preclosed` instead)
-	///   - context: the execution context where the `updater` will run
-	///   - updater: run for each incoming `Result<T>` to update the buffered activation values
-	/// - Returns: a buffered `SignalMulti`
-	public final func mapBuffer<S, U>(withState: S, initialValue: U? = nil, context: Exec = .direct, updater: @escaping (_ state: inout S, _ activationValue: inout U?, _ incoming: T) throws -> U) -> SignalMulti<U> {
-		// NOTE: access to this captured data is kept threadsafe due to subsequent closures being `.direct`ly invoked (and therefore synchronous with the first closure)
-		var sharedValue = initialValue
-		let syncContext = context.serialized()
-		return failableMap(withState: withState, context: syncContext) { (state: inout S, incoming: T) throws -> U in
-			return try updater(&state, &sharedValue, incoming)
-		}.buffer(initial: sharedValue.map { [$0] } ?? [], context: syncContext) { (values: inout Array<U>, error: inout Error?, result: Result<U>) in
-			switch result {
-			case .success: values = sharedValue.map { [$0] } ?? []
-			case .failure(let e): values = []; error = e
-			}
 		}
 	}
 }
 
+/// A `SignalMergeSet` exposes the ability to close the output signal and disconnect on deactivation. For public interfaces, neither of these is really appropriate to expose. A `SignalCollector` provides a simple wrapper around `SignalMergeSet` that forces `closesOutput` and `removeOnDeactivate` to be *false* for all inputs created through this interface.
+/// A `SignalCollector` also hides details about the output from the input. Forcing `removeOnDeactivate` is one part of this but the other part is that `SignalCollector` does not `throw` from its `add` or `Signal.join` functions.
+/// NOTE: it is possible to create the underlying `SignalMergeSet` and privately add inputs with other properties, if you wish.
+public final class SignalCollector<T> {
+	private let mergeSet: SignalMergeSet<T>
+	public init(mergeSet: SignalMergeSet<T>) {
+		self.mergeSet = mergeSet
+	}
+	
+	public func add(_ source: Signal<T>) {
+		_ = try? mergeSet.add(source)
+	}
+	
+	public func remove(_ source: Signal<T>) {
+		mergeSet.remove(source)
+	}
+
+	public func input() -> SignalInput<T> {
+		return Signal<T>.create { s -> () in self.add(s) }.input
+	}
+}
+
+extension Signal {
+	public final func join(to: SignalCollector<T>) {
+		to.add(self)
+	}
+	
+	public final func cancellableJoin(to: SignalCollector<T>) -> Cancellable {
+		to.add(self)
+		return OnDelete { [weak to, weak self] in
+			guard let t = to, let s = self else { return }
+			t.remove(s)
+		}
+	}
+	
+	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
+	///
+	/// - returns: the `SignalInput` and `Signal` pair
+	public static func createCollector() -> (collector: SignalCollector<T>, signal: Signal<T>) {
+		let (ms, s) = Signal<T>.createMergeSet()
+		return (SignalCollector(mergeSet: ms), s)
+	}
+	
+	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
+	///
+	/// - returns: the `SignalInput` and `Signal` pair
+	public static func createCollector<U>(compose: (Signal<T>) throws -> U) rethrows -> (collector: SignalCollector<T>, composed: U) {
+		let (a, b) = try Signal<T>.createMergeSet(compose: compose)
+		return (SignalCollector(mergeSet: a), b)
+	}
+}
+
+/// This wrapper around `SignalEndpoint` exposes the last received value in a stream so that it can be 'polled' (read synchronously from an arbitrary execution context).
+///
+/// **WARNING**: this class should be avoided where possible since it removes the "reactive" part of reactive programming (changes in the polled value must be detected through other means, usually another subscriber to the underlying `Signal`).
+///
+/// The typical use-case for this type of class is in the implementation of delegate methods and similar callback functions that must synchronously return a value. Since you cannot simply `Signal.combine` the delegate method with another `Signal`, you must use polling to generate a calculation involving values from another `Signal`.
+public final class SignalPollingEndpoint<T> {
+	var endpoint: SignalEndpoint<T>? = nil
+	var latest: Result<T>? = nil
+	let queueContext = DispatchQueueContext()
+	
+	public init(signal: Signal<T>) {
+		endpoint = signal.subscribe(context: .custom(queueContext)) { [weak self] r in
+			self?.latest = r
+		}
+	}
+	
+	public var latestResult: Result<T>? {
+		return queueContext.queue.sync { latest }
+	}
+	
+	public var latestValue: T? {
+		return queueContext.queue.sync { latest?.value }
+	}
+}
+
+extension Signal {
+	/// Appends a `SignalPollingEndpoint` listener to the value emitted from this `Signal`. The endpoint will "activate" this `Signal` and all direct antecedents in the graph (which may start lazy operations deferred until activation).
+	public func pollingEndpoint() -> SignalPollingEndpoint<T> {
+		return SignalPollingEndpoint(signal: self)
+	}
+	
+	/// Internally creates a polling endpoint which is polled once for the latest Result<T> and then discarded.
+	public var poll: Result<T>? {
+		return SignalPollingEndpoint(signal: self).latestResult
+	}
+}
+
+extension SignalInput {
+	/// Create a `SignalInput`-`Signal` pair, returning the `SignalInput` and handling the `Signal` internally using the `compose` closure. This is a syntactic convenience for functions that require a `SignalInput` parameter.
+	public static func into(_ compose: (Signal<T>) throws -> Void) rethrows -> SignalInput<T> {
+		return try Signal<T>.create { s in try compose(s) }.input
+	}
+	
+	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
+	public func viaMap<U>(_ map: @escaping (U) -> T) throws -> SignalInput<U> {
+		return try .into { s in try s.map(map).join(to: self) }
+	}
+	
+	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
+	public func via<U>(_ compose: (Signal<U>) -> Signal<T>) throws -> SignalInput<U> {
+		return try .into { s in try compose(s).join(to: self) }
+	}
+}
+
+extension SignalCollector {
+	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
+	public func viaMap<U>(_ map: @escaping (U) -> T) -> SignalInput<U> {
+		return .into { s in s.map(map).join(to: self) }
+	}
+	
+	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
+	public func via<U>(_ compose: (Signal<U>) -> Signal<T>) -> SignalInput<U> {
+		return .into { s in compose(s).join(to: self) }
+	}
+}
+
 extension SignalCapture {
+	/// A convenience version of `subscribe` that only invokes the `processor` on `Result.success`
+	///
+	/// - Parameters:
+	///   - resend: if true, captured values are sent to the new output as the first values in the stream, otherwise, captured values are not sent (default is false)
+	///   - context: the execution context where the `processor` will be invoked
+	///   - processor: will be invoked with each value received
+	/// - Returns: the `SignalEndpoint` created by this function
 	public func subscribeValues(resend: Bool = false, context: Exec = .direct, handler: @escaping (T) -> Void) -> SignalEndpoint<T> {
 		let (input, output) = Signal<T>.create()
-		try! join(toInput: input, resend: resend)
+		try! join(to: input, resend: resend)
 		return output.subscribeValues(context: context, handler: handler)
 	}
 	
+	/// A convenience version of `subscribe` that only invokes the `processor` on `Result.success`
+	///
+	/// - Parameters:
+	///   - resend: if true, captured values are sent to the new output as the first values in the stream, otherwise, captured values are not sent (default is false)
+	///   - onError: if nil, errors from self will be passed through to `toInput`'s `Signal` normally. If non-nil, errors will not be sent, instead, the `Signal` will be disconnected and the `onError` function will be invoked with the disconnected `SignalCapture` and the input created by calling `disconnect` on it.
+	///   - context: the execution context where the `processor` will be invoked
+	///   - processor: will be invoked with each value received
+	/// - Returns: the `SignalEndpoint` created by this function
 	public func subscribeValues(resend: Bool = false, onError: @escaping (SignalCapture<T>, Error, SignalInput<T>) -> (), context: Exec = .direct, handler: @escaping (T) -> Void) -> SignalEndpoint<T> {
 		let (input, output) = Signal<T>.create()
-		try! join(toInput: input, resend: resend, onError: onError)
+		try! join(to: input, resend: resend, onError: onError)
 		return output.subscribeValues(context: context, handler: handler)
 	}
 }

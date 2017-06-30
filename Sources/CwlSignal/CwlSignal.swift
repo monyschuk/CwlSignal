@@ -17,8 +17,6 @@
 //  OF THIS SOFTWARE.
 //
 
-import Foundation
-
 /// A composable one-way communication channel that delivers a sequence of `Result<T>` items to a `handler` function running in a potentially different execution context. Delivery is serial (FIFO) queuing as required.
 ///
 /// The intended use case is as a serialized asynchronous change propagation framework.
@@ -111,16 +109,6 @@ public class Signal<T> {
 		return (SignalInput(signal: s, activationCount: s.activationCount), s)
 	}
 	
-	/// Like `create` but also provides a trailing closure to transform the `Signal` normally returned from `create` and in its place, return the result of the transformation.
-	///
-	/// - Parameter compose: a trailing closure which receices the `Signal` as a parameter and any result is returned as the second tuple parameter from this function
-	/// - Returns: a (`SignalInput`, U) tuple where `SignalInput` is the input to the signal graph and `U` is the return value from the `compose` function.
-	/// - Throws: rethrows any error from the closure
-	public static func create<U>(compose: (Signal<T>) throws -> U) rethrows -> (input: SignalInput<T>, composed: U) {
-		let (i, s) = create()
-		return (i, try compose(s))
-	}
-	
 	/// Similar to `create`, in that it creates a "head" for the graph but rather than immediately providing a `SignalInput`, this function calls the `activationChange` function when the signal graph is activated and provides the newly created `SignalInput` at that time. When the graph deactivates, `nil` is sent to the `activationChange` function. If a subsequent reactivation occurs, the new `SignalInput` for the re-activation is provided.
 	///
 	/// - Parameters:
@@ -136,38 +124,6 @@ public class Signal<T> {
 			}
 		})
 		return s
-	}
-	
-	/// Similar to `create` but uses a `SignalMergeSet` as the input to the signal pipeline instead of a `SignalInput`. A `SignalMergeSet` can accept multiple, changing inputs with different "on-error/on-close" behaviors.
-	///
-	/// - Parameters:
-	///   - initialInputs: any initial signals to be used as inputs to the `SignalMergeSet`.
-	///   - closePropagation: close and error propagation behavior to be used for each of `initialInputs`
-	///   - removeOnDeactivate: deactivate behavior to be used for each of `initialInputs`
-	/// - Returns: the (mergeSet, signal)
-	public static func createMergeSet<S: Sequence>(_ initialInputs: S, closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false) -> (mergeSet: SignalMergeSet<T>, signal: Signal<T>) where S.Iterator.Element: Signal<T> {
-		let (mergeSet, signal) = Signal<T>.createMergeSet()
-		for i in initialInputs {
-			try! mergeSet.add(i, closePropagation: closePropagation, removeOnDeactivate: removeOnDeactivate)
-		}
-		return (mergeSet, signal)
-	}
-	
-	/// Similar to `create` but uses a `SignalMergeSet` as the input to the signal pipeline instead of a `SignalInput`. A `SignalMergeSet` can accept multiple, changing inputs with different "on-error/on-close" behaviors.
-	///
-	/// - Parameters:
-	///   - initialInputs: any initial signals to be used as inputs to the `SignalMergeSet`.
-	///   - closePropagation: close and error propagation behavior to be used for each of `initialInputs`
-	///   - removeOnDeactivate: deactivate behavior to be used for each of `initialInputs`
-	///   - compose: a trailing closure which receices the `Signal` as a parameter and any result is returned as the second tuple parameter from this function
-	/// - Returns: a (`SignalMergeSet`, U) tuple where `SignalMergeSet` is the input to the signal graph and `U` is the return value from the `compose` function.
-	/// - Throws: rethrows any error from the closure
-	public static func createMergeSet<S: Sequence, U>(_ initialInputs: S, closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false, compose: (Signal<T>) throws -> U) rethrows -> (mergeSet: SignalMergeSet<T>, composed: U) where S.Iterator.Element: Signal<T> {
-		let (mergeSet, signal) = try Signal<T>.createMergeSet(compose: compose)
-		for i in initialInputs {
-			try! mergeSet.add(i, closePropagation: closePropagation, removeOnDeactivate: removeOnDeactivate)
-		}
-		return (mergeSet, signal)
 	}
 	
 	/// A simplified version of `createMergeSet` that creates no initial inputs.
@@ -204,6 +160,8 @@ public class Signal<T> {
 	}
 	
 	/// A version of `subscribe` that retains the `SignalEndpoint` internally, keeping the signal graph alive. The `SignalEndpoint` is cancelled and released if the signal closes or if the handler returns `false` after any signal.
+	///
+	/// NOTE: this subscriber deliberately creates a reference counted loop. If the signal is never closed, it will result in a memory leak. This function should be used only when `self` is guaranteed to close.
 	///
 	/// - Parameters:
 	///   - context: the execution context where the `processor` will be invoked
@@ -267,7 +225,7 @@ public class Signal<T> {
 	/// Appends a disconnected `SignalJunction` to this `Signal` so outputs can be repeatedly joined and disconnected from this graph in the future.
 	///
 	/// - Returns: the `SignalJunction<T>`
-	@discardableResult public final func junction() -> SignalJunction<T> {
+	public final func junction() -> SignalJunction<T> {
 		return attach { (s, dw) -> SignalJunction<T> in
 			return SignalJunction<T>(signal: s, dw: &dw)
 		}
@@ -276,7 +234,7 @@ public class Signal<T> {
 	/// Appends a connected `SignalJunction` to this `Signal` so the graph can be disconnected in the future.
 	///
 	/// - Returns: the `SignalJunction<T>` and the connected `Signal` as a pair
-	@discardableResult public final func junctionSignal() -> (SignalJunction<T>, Signal<T>) {
+	public final func junctionSignal() -> (SignalJunction<T>, Signal<T>) {
 		let (input, signal) = Signal<T>.create()
 		let j = try! self.join(to: input)
 		return (j, signal)
@@ -285,7 +243,7 @@ public class Signal<T> {
 	/// Appends a connected `SignalJunction` to this `Signal` so the graph can be disconnected in the future.
 	///
 	/// - Returns: the `SignalJunction<T>` and the connected `Signal` as a pair
-	@discardableResult public final func junctionSignal(onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) -> (SignalJunction<T>, Signal<T>) {
+	public final func junctionSignal(onError: @escaping (SignalJunction<T>, Error, SignalInput<T>) -> ()) -> (SignalJunction<T>, Signal<T>) {
 		let (input, signal) = Signal<T>.create()
 		let j = try! self.join(to: input, onError: onError)
 		return (j, signal)
@@ -672,6 +630,7 @@ public class Signal<T> {
 		if let r = result {
 			return r
 		} else {
+			assertionFailure("Single listener `Signal` consumed multiple times.")
 			return Signal<T>.preclosed(error: SignalError.duplicate).attach(constructor: constructor)
 		}
 	}
@@ -1285,7 +1244,6 @@ public final class SignalMulti<T>: Signal<T> {
 		}
 	}
 }
-
 
 /// Used to provide a light abstraction over the `SignalInput` and `SignalNext` types.
 /// In general, the only real purpose of this protocol is to enable the `send(value:)`, `send(error:)`, `close()` extensions in "SignalExternsions.swift"
@@ -2680,7 +2638,9 @@ fileprivate class SignalMergeProcessor<T>: SignalProcessor<T, T> {
 }
 
 /// A merge set allows multiple `Signal`s of the same type to dynamically connect to a single output `Signal`. A merge set is analagous to a `SignalInput` in that it controls the input to a `Signal` but instead of controlling it by sending signals, it controls by connecting predecessors.
-public class SignalMergeSet<T>: Cancellable {
+public class SignalMergeSet<T>: Cancellable, SignalSender {
+	public typealias ValueType = T
+
 	fileprivate weak var signal: Signal<T>?
 	
 	// Constructs a `SignalMergeSet` (typically called from `Signal<T>.createMergeSet`)
@@ -2740,6 +2700,16 @@ public class SignalMergeSet<T>: Cancellable {
 		}.input
 	}
 	
+	/// The primary signal sending function
+	///
+	/// NOTE: on `SignalMergeSet` this is a low performance convenience method; it creates a new `input()` on each send
+	///
+	/// - Parameter result: the value or error to send, composed as a `Result`
+	/// - Returns: `nil` on success. Non-`nil` values include `SignalError.cancelled` if the `predecessor` or `activationCount` fail to match, `SignalError.inactive` if the current `delivery` state is `.disabled`.
+	@discardableResult public func send(result: Result<ValueType>) -> SignalError? {
+		return input().send(result: result)
+	}
+
 	/// Implementation of `Cancellable` immediately sends a `SignalError.cancelled` to the `SignalMergeSet` destination.
 	public func cancel() {
 		guard let sig = signal else { return }

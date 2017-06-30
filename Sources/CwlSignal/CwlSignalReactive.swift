@@ -422,7 +422,7 @@ extension Signal {
 	
 	/// Implementation of [Reactive X operator "Buffer"](http://reactivex.io/documentation/operators/buffer.html) for non-overlapping buffers of fixed length.
 	///
-	/// - Note: this is just a convenience wrapper around `buffer(count:skip:behavior)` where `skip` equals `count`.
+	/// - Note: this is just a convenience wrapper around `buffer(count:skip:)` where `skip` equals `count`.
 	///
 	/// - Parameter count: the number of separate values to accumulate before emitting an array of values
 	/// - Returns: a signal where the values are arrays of values from `self`, accumulated according to `count`
@@ -699,7 +699,8 @@ extension Signal {
 				if let o = outputs[u] {
 					o.send(value: v)
 				} else {
-					let (input, signal) = Signal<T>.create { s in s.cacheUntilActive() }
+					let (input, preCachedSignal) = Signal<T>.create()
+					let signal = preCachedSignal.cacheUntilActive()
 					input.send(value: v)
 					n.send(value: (u, signal))
 					outputs[u] = input
@@ -1481,6 +1482,21 @@ extension Signal {
 		return signal
 	}
 	
+	/// Implementation of [Reactive X operator "merge"](http://reactivex.io/documentation/operators/merge.html) where the output closes only when the last source closes.
+	///
+	/// NOTE: the signal closes as `SignalError.cancelled` when the last output closes. For other closing semantics, use `Signal.mergSetAndSignal` instead.
+	///
+	/// - Parameter sources: a variable parameter list of `Signal<T>` instances that are merged with `self` to form the result.
+	/// - Returns: a signal that emits every value from every `sources` input `signal`.
+	public func mergeWith(sources: [Signal<T>]) -> Signal<T> {
+		let (mergeSet, signal) = Signal<T>.createMergeSet()
+		try! mergeSet.add(self, closePropagation: .errors)
+		for s in sources {
+			try! mergeSet.add(s, closePropagation: .errors)
+		}
+		return signal
+	}
+	
 	/// Implementation of [Reactive X operator "startWith"](http://reactivex.io/documentation/operators/startwith.html)
 	///
 	/// - Parameter sequence: a sequence of values.
@@ -1518,7 +1534,7 @@ extension Signal {
 	///
 	/// See also: `flatMapLatest` (emits values from the latest `Signal` to start emitting)
 	///
-	/// NOTE: ideally, this would not be a static function but a "same type" conditional extension. In a future Swift release this will probably change.
+	/// NOTE: ideally, this would not be a static function but a T == Signal<U> conditional extension. Without higher-kinded types, this is difficult to express. In a future Swift release this will probably change.
 	///
 	/// - Parameter signal: each of the inner signals emitted by this outer signal is observed, with the most recent signal emitted from the result
 	/// - Returns: a signal that emits the values from the latest `Signal` emitted by `signal`
@@ -2019,7 +2035,7 @@ extension Signal {
 	///   - context: where the handler will be invoked
 	///   - handler: invoked when self is deactivated
 	/// - Returns: a signal that emits the same outputs as self
-	public func onDeactivate(context: Exec = .direct, f: @escaping () -> ()) -> Signal<T> {
+	public func onDeactivate(context: Exec = .direct, handler: @escaping () -> ()) -> Signal<T> {
 		let signal = Signal<T>.generate { input in
 			if let i = input {
 				do {
@@ -2028,7 +2044,7 @@ extension Signal {
 					i.send(error: error)
 				}
 			} else {
-				f()
+				handler()
 			}
 		}
 		return signal
@@ -2293,12 +2309,12 @@ extension Signal {
 	/// - Returns: a signal that emits the same values as self or mirrors `alternate` if self closes without emitting a value
 	public func switchIfEmpty(alternate: Signal<T>) -> Signal<T> {
 		var fallback: Signal<T>? = alternate
-		let (input, signal) = Signal<T>.create { s -> Signal<T> in
-			s.map { v in
-				fallback = nil
-				return v
-			}
+		let (input, preMappedSignal) = Signal<T>.create()
+		let signal = preMappedSignal.map { (t: T) -> T in
+			fallback = nil
+			return t
 		}
+		
 		do {
 			try join(to: input) { (j: SignalJunction<T>, e: Error, i: SignalInput<T>) in
 				do {

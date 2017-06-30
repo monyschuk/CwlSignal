@@ -27,7 +27,35 @@ extension SignalSender {
 	public func send(value: ValueType) -> SignalError? {
 		return send(result: .success(value))
 	}
-
+	
+	/// A convenience version of `send` that wraps a value in `Result.success` before sending
+	///
+	/// - Parameter value: will be wrapped and sent
+	/// - Returns: the return value from the underlying `send(result:)` function
+	@discardableResult
+	public func send(values: ValueType...) -> SignalError? {
+		for v in values {
+			if let e = send(result: .success(v)) {
+				return e
+			}
+		}
+		return nil
+	}
+	
+	/// A convenience version of `send` that wraps a value in `Result.success` before sending
+	///
+	/// - Parameter value: will be wrapped and sent
+	/// - Returns: the return value from the underlying `send(result:)` function
+	@discardableResult
+	public func send<S: Sequence>(sequence: S) -> SignalError? where S.Iterator.Element == ValueType {
+		for v in sequence {
+			if let e = send(result: .success(v)) {
+				return e
+			}
+		}
+		return nil
+	}
+	
 	/// A convenience version of `send` that wraps an error in `Result.failure` before sending
 	///
 	/// - Parameter error: will be wrapped and sent
@@ -47,6 +75,48 @@ extension SignalSender {
 }
 
 extension Signal {
+	// Like `create` but also provides a trailing closure to transform the `Signal` normally returned from `create` and in its place, return the result of the transformation.
+	//
+	// - Parameter compose: a trailing closure which receices the `Signal` as a parameter and any result is returned as the second tuple parameter from this function
+	// - Returns: a (`SignalInput`, U) tuple where `SignalInput` is the input to the signal graph and `U` is the return value from the `compose` function.
+	// - Throws: rethrows any error from the closure
+	public static func create<U>(compose: (Signal<T>) throws -> U) rethrows -> (input: SignalInput<T>, composed: U) {
+		let (i, s) = Signal<T>.create()
+		return (i, try compose(s))
+	}
+	
+	/// Similar to `create` but uses a `SignalMergeSet` as the input to the signal pipeline instead of a `SignalInput`. A `SignalMergeSet` can accept multiple, changing inputs with different "on-error/on-close" behaviors.
+	///
+	/// - Parameters:
+	///   - initialInputs: any initial signals to be used as inputs to the `SignalMergeSet`.
+	///   - closePropagation: close and error propagation behavior to be used for each of `initialInputs`
+	///   - removeOnDeactivate: deactivate behavior to be used for each of `initialInputs`
+	/// - Returns: the (mergeSet, signal)
+	public static func createMergeSet<S: Sequence>(_ initialInputs: S, closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false) -> (mergeSet: SignalMergeSet<T>, signal: Signal<T>) where S.Iterator.Element: Signal<T> {
+		let (mergeSet, signal) = Signal<T>.createMergeSet()
+		for i in initialInputs {
+			try! mergeSet.add(i, closePropagation: closePropagation, removeOnDeactivate: removeOnDeactivate)
+		}
+		return (mergeSet, signal)
+	}
+	
+	/// Similar to `create` but uses a `SignalMergeSet` as the input to the signal pipeline instead of a `SignalInput`. A `SignalMergeSet` can accept multiple, changing inputs with different "on-error/on-close" behaviors.
+	///
+	/// - Parameters:
+	///   - initialInputs: any initial signals to be used as inputs to the `SignalMergeSet`.
+	///   - closePropagation: close and error propagation behavior to be used for each of `initialInputs`
+	///   - removeOnDeactivate: deactivate behavior to be used for each of `initialInputs`
+	///   - compose: a trailing closure which receices the `Signal` as a parameter and any result is returned as the second tuple parameter from this function
+	/// - Returns: a (`SignalMergeSet`, U) tuple where `SignalMergeSet` is the input to the signal graph and `U` is the return value from the `compose` function.
+	/// - Throws: rethrows any error from the closure
+	public static func createMergeSet<S: Sequence, U>(_ initialInputs: S, closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false, compose: (Signal<T>) throws -> U) rethrows -> (mergeSet: SignalMergeSet<T>, composed: U) where S.Iterator.Element: Signal<T> {
+		let (mergeSet, signal) = try Signal<T>.createMergeSet(compose: compose)
+		for i in initialInputs {
+			try! mergeSet.add(i, closePropagation: closePropagation, removeOnDeactivate: removeOnDeactivate)
+		}
+		return (mergeSet, signal)
+	}
+	
 	/// A version of `generate` that retains the latest `input` so it doesn't automatically close the signal when the input falls out of scope. This enables a generator that never closes (lives until deactivation).
 	///
 	/// - Parameters:
@@ -209,10 +279,12 @@ extension Signal {
 	}
 }
 
-/// A `SignalMergeSet` exposes the ability to close the output signal and disconnect on deactivation. For public interfaces, neither of these is really appropriate to expose. A `SignalCollector` provides a simple wrapper around `SignalMergeSet` that forces `closesOutput` and `removeOnDeactivate` to be *false* for all inputs created through this interface.
-/// A `SignalCollector` also hides details about the output from the input. Forcing `removeOnDeactivate` is one part of this but the other part is that `SignalCollector` does not `throw` from its `add` or `Signal.join` functions.
+/// A `SignalMergeSet` exposes the ability to close the output signal and disconnect on deactivation. For public interfaces, neither of these is really appropriate to expose. A `SignalMultiInput` provides a simple wrapper around `SignalMergeSet` that forces `closesOutput` and `removeOnDeactivate` to be *false* for all inputs created through this interface.
+/// A `SignalMultiInput` also hides details about the output from the input. Forcing `removeOnDeactivate` is one part of this but the other part is that `SignalMultiInput` does not `throw` from its `add` or `Signal.join` functions.
 /// NOTE: it is possible to create the underlying `SignalMergeSet` and privately add inputs with other properties, if you wish.
-public final class SignalCollector<T> {
+public final class SignalMultiInput<T>: SignalSender {
+	public typealias ValueType = T
+
 	private let mergeSet: SignalMergeSet<T>
 	public init(mergeSet: SignalMergeSet<T>) {
 		self.mergeSet = mergeSet
@@ -220,7 +292,7 @@ public final class SignalCollector<T> {
 	
 	/// Calls `add` on the underlying mergeSet with default parameters (closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false)
 	///
-	/// NOTE: any possible error thrown by the underlying `SignalMergeSet.add` will be consumed and hidden (it's not `SignalCollector`s responsibility to communicate information about the output).
+	/// NOTE: any possible error thrown by the underlying `SignalMergeSet.add` will be consumed and hidden (it's not `SignalMultiInput`s responsibility to communicate information about the output).
 	///
 	/// - Parameter source: added to the underlying merge set
 	public func add(_ source: Signal<T>) {
@@ -239,7 +311,19 @@ public final class SignalCollector<T> {
 	///
 	/// - Returns: a new `SignalInput` that feeds into the collector
 	public func input() -> SignalInput<T> {
-		return Signal<T>.create { s -> () in self.add(s) }.input
+		let (i, s) = Signal<T>.create()
+		self.add(s)
+		return i
+	}
+
+	/// The primary signal sending function
+	///
+	/// NOTE: on `SignalMultiInput` this is a low performance convenience method; it creates a new `input()` on each send
+	///
+	/// - Parameter result: the value or error to send, composed as a `Result`
+	/// - Returns: `nil` on success. Non-`nil` values include `SignalError.cancelled` if the `predecessor` or `activationCount` fail to match, `SignalError.inactive` if the current `delivery` state is `.disabled`.
+	@discardableResult public func send(result: Result<ValueType>) -> SignalError? {
+		return input().send(result: result)
 	}
 }
 
@@ -271,20 +355,20 @@ extension Signal {
 		}
 	}
 
-	/// Joins this `Signal` to a destination `SignalCollector`
+	/// Joins this `Signal` to a destination `SignalMultiInput`
 	///
 	/// - Parameters:
-	///   - to: target `SignalCollector` to which this signal will be added
-	public final func join(to: SignalCollector<T>) {
+	///   - to: target `SignalMultiInput` to which this signal will be added
+	public final func join(to: SignalMultiInput<T>) {
 		to.add(self)
 	}
 	
-	/// Joins this `Signal` to a destination `SignalCollector` and returns a `Cancellable` that, when cancelled, will remove the `Signal` from the `SignalCollector` again.
+	/// Joins this `Signal` to a destination `SignalMultiInput` and returns a `Cancellable` that, when cancelled, will remove the `Signal` from the `SignalMultiInput` again.
 	///
 	/// - Parameters:
-	///   - to: target `SignalCollector` to which this signal will be added
+	///   - to: target `SignalMultiInput` to which this signal will be added
 	/// - Returns: a `Cancellable` that will undo the join if cancelled or released
-	public final func cancellableJoin(to: SignalCollector<T>) -> Cancellable {
+	public final func cancellableJoin(to: SignalMultiInput<T>) -> Cancellable {
 		to.add(self)
 		return OnDelete { [weak to, weak self] in
 			guard let t = to, let s = self else { return }
@@ -295,17 +379,17 @@ extension Signal {
 	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
 	///
 	/// - returns: the `SignalInput` and `Signal` pair
-	public static func createCollector() -> (collector: SignalCollector<T>, signal: Signal<T>) {
+	public static func createMultiInput() -> (collector: SignalMultiInput<T>, signal: Signal<T>) {
 		let (ms, s) = Signal<T>.createMergeSet()
-		return (SignalCollector(mergeSet: ms), s)
+		return (SignalMultiInput(mergeSet: ms), s)
 	}
 	
 	/// Create a manual input/output pair where values sent to the `input` are passed through the `signal` output.
 	///
 	/// - returns: the `SignalInput` and `Signal` pair
-	public static func createCollector<U>(compose: (Signal<T>) throws -> U) rethrows -> (collector: SignalCollector<T>, composed: U) {
+	public static func createMultiInput<U>(compose: (Signal<T>) throws -> U) rethrows -> (collector: SignalMultiInput<T>, composed: U) {
 		let (a, b) = try Signal<T>.createMergeSet(compose: compose)
-		return (SignalCollector(mergeSet: a), b)
+		return (SignalMultiInput(mergeSet: a), b)
 	}
 }
 
@@ -314,7 +398,7 @@ extension Signal {
 /// **WARNING**: this class should be avoided where possible since it removes the "reactive" part of reactive programming (changes in the polled value must be detected through other means, usually another subscriber to the underlying `Signal`).
 ///
 /// The typical use-case for this type of class is in the implementation of delegate methods and similar callback functions that must synchronously return a value. Since you cannot simply `Signal.combine` the delegate method with another `Signal`, you must use polling to generate a calculation involving values from another `Signal`.
-public final class SignalPollingEndpoint<T> {
+public final class SignalPollableEndpoint<T> {
 	var endpoint: SignalEndpoint<T>? = nil
 	var latest: Result<T>? = nil
 	let queueContext = DispatchQueueContext()
@@ -335,61 +419,14 @@ public final class SignalPollingEndpoint<T> {
 }
 
 extension Signal {
-	/// Appends a `SignalPollingEndpoint` listener to the value emitted from this `Signal`. The endpoint will "activate" this `Signal` and all direct antecedents in the graph (which may start lazy operations deferred until activation).
-	public func pollingEndpoint() -> SignalPollingEndpoint<T> {
-		return SignalPollingEndpoint(signal: self)
+	/// Appends a `SignalPollableEndpoint` listener to the value emitted from this `Signal`. The endpoint will "activate" this `Signal` and all direct antecedents in the graph (which may start lazy operations deferred until activation).
+	public func pollingEndpoint() -> SignalPollableEndpoint<T> {
+		return SignalPollableEndpoint(signal: self)
 	}
 	
 	/// Internally creates a polling endpoint which is polled once for the latest Result<T> and then discarded.
 	public var poll: Result<T>? {
-		return SignalPollingEndpoint(signal: self).latestResult
-	}
-}
-
-extension SignalInput {
-	/// Create a `SignalInput`-`Signal` pair, returning the `SignalInput` and handling the `Signal` internally using the `compose` closure. This is a syntactic convenience for functions that require a `SignalInput` parameter.
-	///
-	/// - Parameter compose: a function that works with the `Signal` half of the newly created pair
-	/// - Returns: the `SignalInput` half of the newly created pair
-	/// - Throws: rethrows any error raised in the `compose` function
-	public static func into(_ compose: (Signal<T>) throws -> Void) rethrows -> SignalInput<T> {
-		return try Signal<T>.create { s in try compose(s) }.input
-	}
-	
-	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
-	///
-	/// - Parameter map: a function used to map the pair's type onto the `ValueType` of `self`
-	/// - Returns: the `SignalInput` half of the newly created pair
-	/// - Throws: rethrows any error raised in the `compose` function
-	public func viaMap<U>(_ map: @escaping (U) -> T) throws -> SignalInput<U> {
-		return try .into { s in try s.map(map).join(to: self) }
-	}
-	
-	/// Creates a new `SignalInput`-`Signal` pair, composes an arbitrary transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
-	///
-	/// - Parameter compose: a function that works with the `Signal` half of the newly created pair and transforms it into the desired signal to `join` to `self`
-	/// - Returns: the `SignalInput` half of the newly created pair
-	/// - Throws: rethrows any error raised in the `compose` function
-	public func via<U>(_ compose: (Signal<U>) -> Signal<T>) throws -> SignalInput<U> {
-		return try .into { s in try compose(s).join(to: self) }
-	}
-}
-
-extension SignalCollector {
-	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
-	///
-	/// - Parameter map: a function used to map the pair's type onto the `ValueType` of `self`
-	/// - Returns: the `SignalInput` half of the newly created pair
-	public func viaMap<U>(_ map: @escaping (U) -> T) -> SignalInput<U> {
-		return .into { s in s.map(map).join(to: self) }
-	}
-	
-	/// Creates a new `SignalInput`-`Signal` pair, appends a `map` transform to the `Signal` and then the transformed `Signal` is `join(to:)` self. The `SignalInput` from the pair is returned.
-	///
-	/// - Parameter compose: a function that works with the `Signal` half of the newly created pair and transforms it into the desired signal to `join` to `self`
-	/// - Returns: the `SignalInput` half of the newly created pair
-	public func via<U>(_ compose: (Signal<U>) -> Signal<T>) -> SignalInput<U> {
-		return .into { s in compose(s).join(to: self) }
+		return SignalPollableEndpoint(signal: self).latestResult
 	}
 }
 

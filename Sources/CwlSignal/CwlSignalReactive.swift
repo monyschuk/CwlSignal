@@ -18,6 +18,11 @@
 //  IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 //
 
+#if SWIFT_PACKAGE
+	import Foundation
+	import CwlUtils
+#endif
+
 #if swift(>=4)
 #else
 	public typealias Numeric = IntegerArithmetic & ExpressibleByIntegerLiteral
@@ -152,7 +157,7 @@ public class SignalSequence<T>: Sequence, IteratorProtocol {
 ///   - initialInterval: duration until first value
 ///   - context: execution context where the timer will run
 /// - Returns: the interval signal
-public func intervalSignal(_ interval: DispatchTimeInterval, initial initialInterval: DispatchTimeInterval? = nil, context: Exec = .default) -> Signal<Int> {
+public func intervalSignal(_ interval: DispatchTimeInterval, initial initialInterval: DispatchTimeInterval? = nil, context: Exec = .global) -> Signal<Int> {
 	// We need to protect the `count` variable and make sure that out-of-date timers don't update it so we use a `serialized` context for the `generate` and the timers, since the combination of the two will ensure that these requirements are met.
 	let serialContext = context.serialized()
 	var timer: Cancellable? = nil
@@ -233,7 +238,7 @@ extension Signal {
 	///   - value: the value that will be sent before closing the signal (if `nil` then the signal will simply be closed at the end of the timer)
 	///   - context: execution context where the timer will be run
 	/// - Returns: the timer signal
-	public static func timer(interval: DispatchTimeInterval, value: T? = nil, context: Exec = .default) -> Signal<T> {
+	public static func timer(interval: DispatchTimeInterval, value: T? = nil, context: Exec = .global) -> Signal<T> {
 		var timer: Cancellable? = nil
 		return Signal<T>.generate(context: context) { input in
 			if let i = input {
@@ -1160,6 +1165,24 @@ extension Signal {
 		}
 	}
 	
+	/// Implementation of [Reactive X operator "ignoreElements"](http://reactivex.io/documentation/operators/ignoreelements.html)
+	///
+	/// - Returns: a signal that emits the input error, when received, otherwise ignores all values.
+	public func ignoreElements<U>(endWith value: U, conditional: @escaping (Error) -> Error? = { $0 }) -> Signal<U> {
+		return transform() { (r: Result<T>, n: SignalNext<U>) in
+			switch r {
+			case .success: break
+			case .failure(let e):
+				if let err = conditional(e) {
+					n.send(value: value)
+					n.send(error: err)
+				} else {
+					n.send(error: e)
+				}
+			}
+		}
+	}
+	
 	/// Implementation of [Reactive X operator "last"](http://reactivex.io/documentation/operators/last.html)
 	///
 	/// - Parameters:
@@ -1193,23 +1216,55 @@ extension Signal {
 			case (.result2(.success), _): break
 			case (.result2(.failure(let e)), _): n.send(error: e)
 			}
-		}.continuous()
+		}
 	}
 	
 	/// Implementation similar to [Reactive X operator "sample"](http://reactivex.io/documentation/operators/sample.html) except that the output also includes the value from the trigger signal.
 	///
 	/// - Parameter trigger: instructs the result to emit the last value from `self`
 	/// - Returns: a signal that, when a value is received from `trigger`, emits the last value (if any) received from `self`.
-	public func sampleCombine<U>(_ trigger: Signal<U>) -> Signal<(T, U)> {
-		return combine(initialState: nil, second: trigger, context: .direct) { (last: inout T?, c: EitherResult2<T, U>, n: SignalNext<(T, U)>) -> Void in
+	public func sampleCombine<U>(_ trigger: Signal<U>) -> Signal<(sample: T, trigger: U)> {
+		return combine(initialState: nil, second: trigger, context: .direct) { (last: inout T?, c: EitherResult2<T, U>, n: SignalNext<(sample: T, trigger: U)>) -> Void in
 			switch (c, last) {
 			case (.result1(.success(let v)), _): last = v
 			case (.result1(.failure(let e)), _): n.send(error: e)
-			case (.result2(.success(let trigger)), .some(let l)): n.send(value: (l, trigger))
+			case (.result2(.success(let t)), .some(let l)): n.send(value: (sample: l, trigger: t))
 			case (.result2(.success), _): break
 			case (.result2(.failure(let e)), _): n.send(error: e)
 			}
-		}.continuous()
+		}
+	}
+	
+	/// Implementation of [Reactive X operator "sample"](http://reactivex.io/documentation/operators/sample.html)
+	///
+	/// - Parameter source: the latest value is emitted when `self` emits
+	/// - Returns: a signal that, when a value is received from `self`, emits the last value (if any) received from `source`.
+	public func latest<U>(_ source: Signal<U>) -> Signal<U> {
+		return source.combine(initialState: nil as U?, second: self, context: .direct) { (last: inout U?, c: EitherResult2<U, T>, n: SignalNext<U>) -> Void in
+			switch (c, last) {
+			case (.result1(.success(let v)), _): last = v
+			case (.result1(.failure(let e)), _): n.send(error: e)
+			case (.result2(.success), .some(let l)): n.send(value: l)
+			case (.result2(.success), _): break
+			case (.result2(.failure(let e)), _): n.send(error: e)
+			}
+		}
+	}
+	
+	/// Implementation similar to [Reactive X operator "sample"](http://reactivex.io/documentation/operators/sample.html) except that the output also includes the value from the trigger signal.
+	///
+	/// - Parameter source: the latest value is emitted when `self` emits
+	/// - Returns: a signal that, when a value is received from `self`, emits the last value (if any) received from `source`.
+	public func latestCombine<U>(_ source: Signal<U>) -> Signal<(trigger: T, sample: U)> {
+		return source.combine(initialState: nil as U?, second: self, context: .direct) { (last: inout U?, c: EitherResult2<U, T>, n: SignalNext<(trigger: T, sample: U)>) -> Void in
+			switch (c, last) {
+			case (.result1(.success(let v)), _): last = v
+			case (.result1(.failure(let e)), _): n.send(error: e)
+			case (.result2(.success(let t)), .some(let l)): n.send(value: (trigger: t, sample: l))
+			case (.result2(.success), _): break
+			case (.result2(.failure(let e)), _): n.send(error: e)
+			}
+		}
 	}
 	
 	/// Implementation of [Reactive X operator "skip"](http://reactivex.io/documentation/operators/skip.html)
@@ -1462,7 +1517,18 @@ extension Signal {
 	///
 	/// - Parameter sources: an `Array` where `signal` is merged into the result.
 	/// - Returns: a signal that emits every value from every `sources` input `signal`.
-	public static func merge<S: Sequence>(_ sources: S) -> Signal<T> where S.Iterator.Element == Signal<T> {
+	public static func merge<S: Sequence>(_ sequence: S) -> Signal<T> where S.Iterator.Element == Signal<T> {
+		let (_, signal) = Signal<T>.createMergeSet(sequence)
+		return signal
+	}
+	
+	/// Implementation of [Reactive X operator "merge"](http://reactivex.io/documentation/operators/merge.html) where the output closes only when the last source closes.
+	///
+	/// NOTE: the signal closes as `SignalError.cancelled` when the last output closes. For other closing semantics, use `Signal.mergSetAndSignal` instead.
+	///
+	/// - Parameter sources: an `Array` where `signal` is merged into the result.
+	/// - Returns: a signal that emits every value from every `sources` input `signal`.
+	public static func merge(_ sources: Signal<T>...) -> Signal<T> {
 		let (_, signal) = Signal<T>.createMergeSet(sources)
 		return signal
 	}
@@ -1473,10 +1539,10 @@ extension Signal {
 	///
 	/// - Parameter sources: a variable parameter list of `Signal<T>` instances that are merged with `self` to form the result.
 	/// - Returns: a signal that emits every value from every `sources` input `signal`.
-	public func mergeWith(_ sources: Signal<T>...) -> Signal<T> {
+	public func mergeWith<S: Sequence>(_ sequence: S) -> Signal<T> where S.Iterator.Element == Signal<T> {
 		let (mergeSet, signal) = Signal<T>.createMergeSet()
 		try! mergeSet.add(self, closePropagation: .errors)
-		for s in sources {
+		for s in sequence {
 			try! mergeSet.add(s, closePropagation: .errors)
 		}
 		return signal
@@ -1488,7 +1554,7 @@ extension Signal {
 	///
 	/// - Parameter sources: a variable parameter list of `Signal<T>` instances that are merged with `self` to form the result.
 	/// - Returns: a signal that emits every value from every `sources` input `signal`.
-	public func mergeWith(sources: [Signal<T>]) -> Signal<T> {
+	public func mergeWith(_ sources: Signal<T>...) -> Signal<T> {
 		let (mergeSet, signal) = Signal<T>.createMergeSet()
 		try! mergeSet.add(self, closePropagation: .errors)
 		for s in sources {
@@ -1522,6 +1588,24 @@ extension Signal {
 			case .failure(let e):
 				if let newEnd = conditional(e) {
 					sequence.forEach { n.send(value: $0) }
+					n.send(error: newEnd)
+				} else {
+					n.send(error: e)
+				}
+			}
+		}
+	}
+	
+	/// Implementation of [Reactive X operator "endWith"](http://reactivex.io/documentation/operators/endwith.html)
+	///
+	/// - Returns: a signal that emits every value from `sequence` on activation and then mirrors `self`.
+	public func endWith(_ value: T, conditional: @escaping (Error) -> Error? = { e in e }) -> Signal<T> {
+		return transform() { (r: Result<T>, n: SignalNext<T>) in
+			switch r {
+			case .success(let v): n.send(value: v)
+			case .failure(let e):
+				if let newEnd = conditional(e) {
+					n.send(value: value)
 					n.send(error: newEnd)
 				} else {
 					n.send(error: e)
@@ -1921,7 +2005,7 @@ extension Signal {
 	///
 	/// - Parameters:
 	///   - initialState:  a mutable state value that will be passed into `shouldRetry`.
-	///   - context: the `Exec` where timed reconnection will occcur (default: .Default).
+	///   - context: the `Exec` where timed reconnection will occcur (default: .global).
 	///   - shouldRetry: a function that, when passed the current state value and the `ErrorType` that closed `self`, returns an `Optional<Double>`.
 	/// - Returns: a signal that emits the values from `self` until an error is received and then, if `shouldRetry` returns non-`nil`, disconnects from `self`, delays by the number of seconds returned from `shouldRetry`, and reconnects to `self` (triggering re-activation), otherwise if `shouldRetry` returns `nil`, emits the `ErrorType` from `self`. If the number of seconds is `0`, the reconnect is synchronous, otherwise it will occur in `context` using `invokeAsync`.
 	public func retry<U>(_ initialState: U, context: Exec = .direct, shouldRetry: @escaping (inout U, Error) -> DispatchTimeInterval?) -> Signal<T> {
@@ -1941,7 +2025,7 @@ extension Signal {
 	/// - Parameters:
 	///   - count: the maximum number of retries
 	///   - delayInterval: the number of seconds between retries
-	///   - context: the `Exec` where timed reconnection will occcur (default: .Default).
+	///   - context: the `Exec` where timed reconnection will occcur (default: .global).
 	/// - Returns: a signal that emits the values from `self` until an error is received and then, if fewer than `count` retries have occurred, disconnects from `self`, delays by `delaySeconds` and reconnects to `self` (triggering re-activation), otherwise if `count` retries have occurred, emits the `ErrorType` from `self`. If the number of seconds is `0`, the reconnect is synchronous, otherwise it will occur in `context` using `invokeAsync`.
 	public func retry(count: Int, delayInterval: DispatchTimeInterval, context: Exec = .direct) -> Signal<T> {
 		return retry(0, context: context) { (retryCount: inout Int, e: Error) -> DispatchTimeInterval? in
@@ -1961,7 +2045,7 @@ extension Signal {
 	/// - Parameters:
 	///   - initialState: a user state value passed into the `offset` function
 	///   - closePropagation: determines how errors and closure in `offset` affects the resulting signal
-	///   - context: the `Exec` where `offset` will run (default: .Default).
+	///   - context: the `Exec` where `offset` will run (default: .global).
 	///   - offset: a function that, when passed the current state value and the latest value from `self`, returns the number of seconds that the value should be delayed (values less or equal to 0 are sent immediately).
 	/// - Returns: a mirror of `self` where values are offset according to `offset` – closing occurs when `self` closes or when the last delayed value is sent (whichever occurs last).
 	public func delay<U>(initialState: U, closePropagation: SignalClosePropagation = .none, context: Exec = .direct, offset: @escaping (inout U, T) -> DispatchTimeInterval) -> Signal<T> {
@@ -1974,7 +2058,7 @@ extension Signal {
 	///
 	/// - Parameters:
 	///   - interval: the delay for each value
-	///   - context: the `Exec` where timed reconnection will occcur (default: .Default).
+	///   - context: the `Exec` where timed reconnection will occcur (default: .global).
 	/// - Returns: a mirror of `self` where values are delayed by `seconds` – closing occurs when `self` closes or when the last delayed value is sent (whichever occurs last).
 	public func delay(interval: DispatchTimeInterval, context: Exec = .direct) -> Signal<T> {
 		return delay(initialState: interval, context: context) { (s: inout DispatchTimeInterval, v: T) -> DispatchTimeInterval in s }
@@ -1984,7 +2068,7 @@ extension Signal {
 	///
 	/// - Parameters:
 	///   - closePropagation: determines how errors and closure in `offset` affects the resulting signal
-	///   - context: the `Exec` where `offset` will run (default: .Default).
+	///   - context: the `Exec` where `offset` will run (default: .global).
 	///   - offset: a function that, when passed the current state value emits a signal, the first value of which will trigger the end of the delay
 	/// - Returns: a mirror of `self` where values are offset according to `offset` – closing occurs when `self` closes or when the last delayed value is sent (whichever occurs last).
 	public func delay<U>(closePropagation: SignalClosePropagation = .none, context: Exec = .direct, offset: @escaping (T) -> Signal<U>) -> Signal<T> {
@@ -1996,7 +2080,7 @@ extension Signal {
 	/// - Parameters:
 	///   - initialState: a user state value passed into the `offset` function
 	///   - closePropagation: determines how errors and closure in `offset` affects the resulting signal
-	///   - context: the `Exec` where `offset` will run (default: .Default).
+	///   - context: the `Exec` where `offset` will run (default: .global).
 	///   - offset: a function that, when passed the current state value emits a signal, the first value of which will trigger the end of the delay
 	/// - Returns: a mirror of `self` where values are offset according to `offset` – closing occurs when `self` closes or when the last delayed value is sent (whichever occurs last).
 	public func delay<U, V>(initialState: V, closePropagation: SignalClosePropagation = .none, context: Exec = .direct, offset: @escaping (inout V, T) -> Signal<U>) -> Signal<T> {
@@ -2232,7 +2316,7 @@ extension Signal {
 	///
 	/// - Parameter inputs: a set of inputs
 	/// - Returns: connects to all inputs then emits the full set of values from the first of these to emit a value
-	public static func amb<S: Sequence>(inputs: S) -> Signal<T> where S.Iterator.Element == Signal<T> {
+	public static func amb<S: Sequence>(_ inputs: S) -> Signal<T> where S.Iterator.Element == Signal<T> {
 		let (mergeSet, signal) = Signal<(Int, Result<T>)>.createMergeSet()
 		inputs.enumerated().forEach { s in
 			_ = try? mergeSet.add(s.element.transform { r, n in

@@ -17,6 +17,11 @@
 //  OF THIS SOFTWARE.
 //
 
+#if SWIFT_PACKAGE
+	import Foundation
+	import CwlUtils
+#endif
+
 /// A composable one-way communication channel that delivers a sequence of `Result<T>` items to a `handler` function running in a potentially different execution context. Delivery is serial (FIFO) queuing as required.
 ///
 /// The intended use case is as a serialized asynchronous change propagation framework.
@@ -103,9 +108,7 @@ public class Signal<T> {
 	/// - returns: a (`SignalInput`, `Signal`) tuple being the input and output for this stage in the signal pipeline.
 	public static func create() -> (input: SignalInput<T>, signal: Signal<T>) {
 		let s = Signal<T>()
-		var dw = DeferredWork()
-		s.mutex.sync { s.updateActivationInternal(andInvalidateAllPrevious: true, dw: &dw) }
-		dw.runWork()
+		s.activationCount = 1
 		return (SignalInput(signal: s, activationCount: s.activationCount), s)
 	}
 	
@@ -2637,7 +2640,9 @@ fileprivate class SignalMergeProcessor<T>: SignalProcessor<T, T> {
 	}
 }
 
-/// A merge set allows multiple `Signal`s of the same type to dynamically connect to a single output `Signal`. A merge set is analagous to a `SignalInput` in that it controls the input to a `Signal` but instead of controlling it by sending signals, it controls by connecting predecessors.
+/// A merge set unifies multiple `Signal`s of the same type – that may dynamically connect and disconnect – into a single output `Signal`.
+/// A merge set implements `SignalSender` so you can view it as analagous to a `SignalInput` in that it controls the input to a `Signal` but instead of controlling it by sending signals, it controls by connecting predecessors.
+/// Direct use of `SignalMergeSet` is not particularly common – use it when you need precise control over the interaction of merged signals and the output. Use of the `SignalMultiInput` type is more common – it is a wrapper around `SignalMergeSet` that uses common "safe" settings.
 public class SignalMergeSet<T>: Cancellable, SignalSender {
 	public typealias ValueType = T
 
@@ -2694,7 +2699,7 @@ public class SignalMergeSet<T>: Cancellable, SignalSender {
 	///   - closePropagation: passed to `add(_:closePropagation:removeOnDeactivate:) internally
 	///   - removeOnDeactivate: passed to `add(_:closePropagation:removeOnDeactivate:) internally
 	/// - Returns: the `SignalInput` that will now feed into this `SignalMergeSet`.
-	public func input(closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false) -> SignalInput<T> {
+	public func newInput(closePropagation: SignalClosePropagation = .none, removeOnDeactivate: Bool = false) -> SignalInput<T> {
 		return Signal<T>.create { s -> () in
 			_ = try? self.add(s, closePropagation: closePropagation, removeOnDeactivate: removeOnDeactivate)
 		}.input
@@ -2702,12 +2707,12 @@ public class SignalMergeSet<T>: Cancellable, SignalSender {
 	
 	/// The primary signal sending function
 	///
-	/// NOTE: on `SignalMergeSet` this is a low performance convenience method; it creates a new `input()` on each send
+	/// NOTE: on `SignalMergeSet` this is a low performance convenience method; it calls `newInput()` on each send. If you plan to send multiple results, it is more efficient to call `newInput()`, retain the `SignalInput` that creates and call `SignalInput` on that single input.
 	///
 	/// - Parameter result: the value or error to send, composed as a `Result`
 	/// - Returns: `nil` on success. Non-`nil` values include `SignalError.cancelled` if the `predecessor` or `activationCount` fail to match, `SignalError.inactive` if the current `delivery` state is `.disabled`.
 	@discardableResult public func send(result: Result<ValueType>) -> SignalError? {
-		return input().send(result: result)
+		return newInput().send(result: result)
 	}
 
 	/// Implementation of `Cancellable` immediately sends a `SignalError.cancelled` to the `SignalMergeSet` destination.

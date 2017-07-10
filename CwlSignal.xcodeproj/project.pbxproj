@@ -484,6 +484,7 @@
 					C9351F931F0B70530038F4E0 = {
 						CreatedOnToolsVersion = 9.0;
 						DevelopmentTeam = S7YQ892G6G;
+						LastSwiftMigration = 0900;
 					};
 					C9351FA31F0B70FB0038F4E0 = {
 						CreatedOnToolsVersion = 9.0;
@@ -503,6 +504,7 @@
 					};
 					C945D7C01E5038C4009AFB8E = {
 						DevelopmentTeam = S7YQ892G6G;
+						LastSwiftMigration = 0900;
 					};
 					C9A380371EFF923A00BFF2E5 = {
 						CreatedOnToolsVersion = 9.0;
@@ -512,6 +514,9 @@
 						LastSwiftMigration = 0900;
 					};
 					C9DD3D9B1E41DFBA00E23B15 = {
+						LastSwiftMigration = 0900;
+					};
+					OBJ_190 = {
 						LastSwiftMigration = 0900;
 					};
 				};

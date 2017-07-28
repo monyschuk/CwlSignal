@@ -58,7 +58,7 @@ public struct SignalChannel<I, T> {
 	public var pair: (input: I, signal: Signal<T>) { return (input, signal) }
 }
 
-func channel<T>() -> SignalChannel<SignalInput<T>, T> {
+public func channel<T>() -> SignalChannel<SignalInput<T>, T> {
 	return SignalChannel<SignalInput<T>, T>(Signal<T>.create())
 }
 
@@ -237,9 +237,8 @@ extension SignalChannel {
 		return (input: tuple.input, endpoint: tuple.output)
 	}
 	
-	public func toggle(initialState: Bool = false) -> (input: I, signal: SignalMulti<Bool>) {
-		let tuple = final { $0.toggle(initialState: initialState) }
-		return (input: tuple.input, signal: tuple.output)
+	public func toggle(initialState: Bool = false) -> SignalChannel<I, Bool> {
+		return next { $0.toggle(initialState: initialState) }
 	}
 }
 

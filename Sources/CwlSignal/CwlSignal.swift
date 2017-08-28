@@ -166,12 +166,12 @@ public class Signal<Value> {
 	
 	/// A version of `subscribe` that retains the `SignalEndpoint` internally, keeping the signal graph alive. The `SignalEndpoint` is cancelled and released if the signal closes or if the handler returns `false` after any signal.
 	///
-	/// NOTE: this subscriber deliberately creates a reference counted loop. If the signal is never closed, it will result in a memory leak. This function should be used only when `self` is guaranteed to close.
+	/// NOTE: this subscriber deliberately creates a reference counted loop. If the signal is never closed and the handler never returns false, it will result in a memory leak. This function should be used only when `self` is guaranteed to close or the handler `false` condition is guaranteed.
 	///
 	/// - Parameters:
 	///   - context: the execution context where the `processor` will be invoked
 	///   - handler: will be invoked with each value received and if returns `false`, the endpoint will be cancelled and released
-	public func subscribeAndKeepAlive(context: Exec = .direct, handler: @escaping (Result<Value>) -> Bool) {
+	public final func subscribeWhile(context: Exec = .direct, handler: @escaping (Result<Value>) -> Bool) {
 		_ = attach { (s, dw) in
 			var handlerRetainedEndpoint: SignalEndpoint<Value>? = nil
 			let endpoint = SignalEndpoint<Value>(signal: s, dw: &dw, context: context, handler: { r in
@@ -411,7 +411,7 @@ public class Signal<Value> {
 	/// - returns: a continuous `SignalMulti`
 	public final func continuous(initialValue: Value) -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([initialValue], nil), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([initialValue], nil), userUpdated: false, activeWithoutOutputs: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
 				let previous: (Array<Value>, Error?) = (a, p)
 				switch r {
 				case .success(let v): a = [v]
@@ -427,7 +427,7 @@ public class Signal<Value> {
 	/// - returns: a continuous `SignalMulti`
 	public final func continuous() -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, activeWithoutOutputs: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
 				let previous: (Array<Value>, Error?) = (a, p)
 				switch r {
 				case .success(let v): a = [v]; p = nil
@@ -443,7 +443,7 @@ public class Signal<Value> {
 	/// - returns: a continuous `SignalMulti`
 	public final func continuousWhileActive() -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: false, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, activeWithoutOutputs: false, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
 				let previous: (Array<Value>, Error?) = (a, p)
 				switch r {
 				case .success(let v): a = [v]; p = nil
@@ -459,7 +459,7 @@ public class Signal<Value> {
 	/// - returns: a playback `SignalMulti`
 	public final func playback() -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, activeWithoutOutputs: true, dw: &dw, context: .direct, updater: { a, p, r -> (Array<Value>, Error?) in
 				switch r {
 				case .success(let v): a.append(v)
 				case .failure(let e): p = e
@@ -483,7 +483,7 @@ public class Signal<Value> {
 	/// - returns: a "multicast" `SignalMulti`.
 	public final func multicast() -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, alwaysActive: false, dw: &dw, context: .direct, updater: nil)
+			SignalMultiProcessor(signal: s, values: ([], nil), userUpdated: false, activeWithoutOutputs: false, dw: &dw, context: .direct, updater: nil)
 		})
 	}
 	
@@ -497,7 +497,7 @@ public class Signal<Value> {
 	/// - Returns: a `SignalMulti` with custom activation
 	public final func customActivation(initialValues: Array<Value> = [], context: Exec = .direct, updater: @escaping (_ cachedValues: inout Array<Value>, _ cachedError: inout Error?, _ incoming: Result<Value>) -> Void) -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: (initialValues, nil), userUpdated: true, alwaysActive: true, dw: &dw, context: context) { (bufferedValues: inout Array<Value>, bufferedError: inout Error?, incoming: Result<Value>) -> (Array<Value>, Error?) in
+			SignalMultiProcessor(signal: s, values: (initialValues, nil), userUpdated: true, activeWithoutOutputs: true, dw: &dw, context: context) { (bufferedValues: inout Array<Value>, bufferedError: inout Error?, incoming: Result<Value>) -> (Array<Value>, Error?) in
 				let oldActivationValues = bufferedValues
 				let oldError = bufferedError
 				updater(&bufferedValues, &bufferedError, incoming)
@@ -514,7 +514,7 @@ public class Signal<Value> {
 	/// - Returns: a `SignalMulti`
 	public static func preclosed<S: Sequence>(values: S, error: Error = SignalError.closed) -> SignalMulti<Value> where S.Iterator.Element == Value {
 		return SignalMulti<Value>(processor: Signal<Value>().attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: (Array(values), error), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
+			SignalMultiProcessor(signal: s, values: (Array(values), error), userUpdated: false, activeWithoutOutputs: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
 		})
 	}
 	
@@ -526,7 +526,7 @@ public class Signal<Value> {
 	/// - Returns: a `SignalMulti`
 	public static func preclosed(_ value: Value, error: Error = SignalError.closed) -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: Signal<Value>().attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([value], error), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
+			SignalMultiProcessor(signal: s, values: ([value], error), userUpdated: false, activeWithoutOutputs: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
 		})
 	}
 	
@@ -536,7 +536,7 @@ public class Signal<Value> {
 	/// - Returns: a `SignalMulti`
 	public static func preclosed(error: Error = SignalError.closed) -> SignalMulti<Value> {
 		return SignalMulti<Value>(processor: Signal<Value>().attach { (s, dw) in
-			SignalMultiProcessor(signal: s, values: ([], error), userUpdated: false, alwaysActive: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
+			SignalMultiProcessor(signal: s, values: ([], error), userUpdated: false, activeWithoutOutputs: true, dw: &dw, context: .direct, updater: { a, p, r in ([], nil) })
 		})
 	}
 	
@@ -972,7 +972,7 @@ public class Signal<Value> {
 			var dw = DeferredWork()
 			mutex.sync {
 				if itemContext.activationCount == activationCount, !delivery.isDisabled {
-					signalHandler?.deactivateInternal(dw: &dw)
+					signalHandler?.deactivateInternal(dueToLackOfOutputs: false, dw: &dw)
 				}
 			}
 			dw.runWork()
@@ -1290,7 +1290,7 @@ fileprivate class SignalHandler<Value> {
 		self.handler = initialHandlerInternal()
 		
 		// Propagate immediately
-		if alwaysActiveInternal {
+		if activeWithoutOutputsInternal {
 			if activateInternal(dw: &dw) {
 				let count = self.signal.activationCount
 				dw.append { self.endActivation(activationCount: count) }
@@ -1316,7 +1316,7 @@ fileprivate class SignalHandler<Value> {
 	}
 	
 	// True if this node activates predecessors even when it has no active successors
-	fileprivate var alwaysActiveInternal: Bool {
+	fileprivate var activeWithoutOutputsInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
 		return false
 	}
@@ -1383,17 +1383,11 @@ fileprivate class SignalHandler<Value> {
 	fileprivate func handleSynchronousToNormalInternal(dw: inout DeferredWork) {
 	}
 	
-	// Override point invoked from `deactivateInternal` used in `SignalEndpoint`
-	// - Parameter dw: required
-	fileprivate func handleDeactivationInternal(dw: inout DeferredWork) {
-	}
-	
 	// Changes delivery to disabled *and* resets the handler to the initial handler.
 	// - Parameter dw: required
-	fileprivate final func deactivateInternal(dw: inout DeferredWork) {
+	fileprivate final func deactivateInternal(dueToLackOfOutputs: Bool, dw: inout DeferredWork) {
 		assert(signal.mutex.unbalancedTryLock() == false)
-		handleDeactivationInternal(dw: &dw)
-		if !alwaysActiveInternal {
+		if !activeWithoutOutputsInternal || !dueToLackOfOutputs {
 			signal.changeDeliveryInternal(newDelivery: .disabled, dw: &dw)
 			dw.append { [handler] in
 				withExtendedLifetime(handler) {}
@@ -1401,7 +1395,11 @@ fileprivate class SignalHandler<Value> {
 				// Endpoints may release themselves on deactivation so we need to keep ourselves alive until outside the lock
 				withExtendedLifetime(self) {}
 			}
-			handler = initialHandlerInternal()
+			if !activeWithoutOutputsInternal {
+				handler = initialHandlerInternal()
+			} else {
+				handler = { r in }
+			}
 		}
 	}
 }
@@ -1531,7 +1529,7 @@ fileprivate class SignalProcessor<Value, U>: SignalHandler<Value>, SignalPredece
 		if activationCount != nil {
 			sendActivationToOutputInternal(index: index, dw: &dw)
 			result = activateInternal(dw: &dw)
-		} else if activationCount == nil && !signal.delivery.isDisabled && !alwaysActiveInternal {
+		} else if activationCount == nil && !signal.delivery.isDisabled && !activeWithoutOutputsInternal {
 			var anyStillActive = false
 			for o in outputs {
 				if o.activationCount != nil {
@@ -1540,7 +1538,7 @@ fileprivate class SignalProcessor<Value, U>: SignalHandler<Value>, SignalPredece
 				}
 			}
 			if !anyStillActive {
-				deactivateInternal(dw: &dw)
+				deactivateInternal(dueToLackOfOutputs: true, dw: &dw)
 			}
 		}
 		
@@ -1735,7 +1733,7 @@ fileprivate class SignalMultiProcessor<Value>: SignalProcessor<Value, Value> {
 	var activationValues: Array<Value>
 	var preclosed: Error?
 	let userUpdated: Bool
-	let alwaysActive: Bool
+	let activeWithoutOutputs: Bool
 	
 	// Rather than using different subclasses for each of the "multi" `Signal`s, this one subclass is used for all. However, that requires a few different parameters to enable different behaviors.
 	//
@@ -1743,24 +1741,24 @@ fileprivate class SignalMultiProcessor<Value>: SignalProcessor<Value, Value> {
 	//   - signal: the predecessor signal
 	//   - values: the initial activation values and error
 	//   - userUpdated: whether the `updater` is user-supplied and needs value-copying to ensure thread-safety
-	//   - alwaysActive: whether the handler should immediately activate
+	//   - activeWithoutOutputs: whether the handler should immediately activate
 	//   - dw: required
 	//   - context: where the `updater` will be run
 	//   - updater: when a new signal is received, updates the cached activation values and error
-	init(signal: Signal<Value>, values: (Array<Value>, Error?), userUpdated: Bool, alwaysActive: Bool, dw: inout DeferredWork, context: Exec, updater: Updater?) {
+	init(signal: Signal<Value>, values: (Array<Value>, Error?), userUpdated: Bool, activeWithoutOutputs: Bool, dw: inout DeferredWork, context: Exec, updater: Updater?) {
 		precondition((values.1 == nil && values.0.isEmpty) || updater != nil, "Non empty activation values requires always active.")
 		self.updater = updater
 		self.activationValues = values.0
 		self.preclosed = values.1
 		self.userUpdated = userUpdated
-		self.alwaysActive = alwaysActive
+		self.activeWithoutOutputs = activeWithoutOutputs
 		super.init(signal: signal, dw: &dw, context: context)
 	}
 	
 	// Multicast and continuousWhileActive are not preactivated but all others are not.
-	fileprivate override var alwaysActiveInternal: Bool {
+	fileprivate override var activeWithoutOutputsInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
-		return alwaysActive
+		return activeWithoutOutputs
 	}
 	
 	// Multiprocessor can handle multiple outputs
@@ -1873,7 +1871,7 @@ fileprivate class SignalCacheUntilActive<Value>: SignalProcessor<Value, Value> {
 	}
 	
 	// Is always active
-	fileprivate override var alwaysActiveInternal: Bool {
+	fileprivate override var activeWithoutOutputsInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
 		return true
 	}
@@ -2307,7 +2305,7 @@ public final class SignalCapture<Value>: SignalProcessor<Value, Value>, Cancella
 	}
 	
 	// Once an output is connected, `SignalCapture` becomes a no-special-behaviors passthrough handler.
-	fileprivate override var alwaysActiveInternal: Bool {
+	fileprivate override var activeWithoutOutputsInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
 		return outputs.count > 0 ? false : true
 	}
@@ -2627,9 +2625,10 @@ fileprivate class SignalMultiInputProcessor<Value>: SignalProcessor<Value, Value
 }
 
 /// Technically, a `SignalInput` is threadsafe and you could share it between multiple locations, if you wished. However, you might want to `join` multiple incoming signals to a single output – in that case, you need a `SignalMultiInput`.
-/// You can use a `SignalMultiInput` like a `SignalInput`, if you wish, but that's not its key purpose. The key purpose of a `SignalMultiInpu` is that you can `join` to it, multiple times, spawning multiple `SignalInput`s connected to the same outgoing `Signal`, in much the same way that `SignalMulti` can spawn multiple outgoing `Signal`s connected to the same source `Signal`.
+/// You can use a `SignalMultiInput` like a `SignalInput`, if you wish, but that's not its key purpose. The key purpose of a `SignalMultiInput` is that you can `join` to it, multiple times, spawning multiple `SignalInput`s connected to the same outgoing `Signal`, in much the same way that `SignalMulti` can spawn multiple outgoing `Signal`s connected to the same source `Signal`.
 /// There's an important semantic difference here between `SignalInput` and `SignalMultiInput`... when an error is sent to one of the inputs spawned by `SignalMultiInput`, it disconnects the `SignalInput` but the error is not propagated to the output signal. This is in accordance with the idea that `SignalMultiInput` is safe in a shared interface – one incoming signal cannot close the outgoing signal and disconnect all the other signals. If you need incoming signals to have the ability to close the outgoing signal, use the `SignalMergedInput` subclass.
-/// Another minor difference is that a `SignalInput` is invalidated when the graph deactivates whereas `SignalMultiInput` remains valid (however, the `SignalInput`s it spawns may be invalidated).
+/// Another difference is that a `SignalInput` is invalidated when the graph deactivates whereas `SignalMultiInput` remains valid.
+/// NOTE: while a `SignalMultiInput` is generally usable in an external interface, it does include a `cancel` method (which removes all incoming signals and cancels the output). If you want to hide this behavior, you would still need to keep the `SignalMultiInput` internal and expose your own `add` function. 
 public class SignalMultiInput<Value>: SignalInput<Value> {
 	// Constructs a `SignalMergedInput` (typically called from `Signal<Value>.createMergedInput`)
 	//
@@ -2706,7 +2705,7 @@ public class SignalMultiInput<Value>: SignalInput<Value> {
 	}
 }
 
-/// Direct use of `SignalMergedInput` is not particularly common – use it when you need precise control over the interaction of multiple inputs to a `Signal`.
+/// Direct use of `SignalMergedInput` is not particularly common. It's typical use is for internal subgraph construction where you need precise control over the interaction of multiple inputs to a `Signal`.
 public class SignalMergedInput<Value>: SignalMultiInput<Value> {
 	/// Connect a new predecessor to the `Signal`
 	///
@@ -2747,7 +2746,6 @@ public class SignalMergedInput<Value>: SignalMultiInput<Value> {
 /// This class is instantiated by calling `subscribe` on any `Signal`.
 public final class SignalEndpoint<Value>: SignalHandler<Value>, Cancellable {
 	private let userHandler: (Result<Value>) -> Void
-	private var closed = false
 	
 	/// Constructor called from `subscribe`
 	///
@@ -2768,31 +2766,21 @@ public final class SignalEndpoint<Value>: SignalHandler<Value>, Cancellable {
 		return { [userHandler] r in userHandler(r) }
 	}
 	
-	// Endpoints are "always active" until they deactivate, after which they never reactivate.
-	// - Parameter dw: required
-	fileprivate override func handleDeactivationInternal(dw: inout DeferredWork) {
-		closed = true
-	}
-	
 	/// A `SignalEndpoint` is active until closed (receives a `failure` signal)
-	fileprivate override var alwaysActiveInternal: Bool {
+	fileprivate override var activeWithoutOutputsInternal: Bool {
 		assert(signal.mutex.unbalancedTryLock() == false)
-		if closed {
-			return false
-		} else {
-			return true
-		}
+		return true
 	}
 	
 	/// A simple test for whether this endpoint has received an error, yet. Not generally needed (responding to state changes is best done through the handler function itself).
 	public var isClosed: Bool {
-		return sync { closed }
+		return sync { signal.delivery.isDisabled }
 	}
 	
 	/// Implementatation of `Cancellable` forces deactivation
 	public func cancel() {
 		var dw = DeferredWork()
-		sync { if !closed { deactivateInternal(dw: &dw) } }
+		sync { if !signal.delivery.isDisabled { deactivateInternal(dueToLackOfOutputs: false, dw: &dw) } }
 		dw.runWork()
 	}
 	

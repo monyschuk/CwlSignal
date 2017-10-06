@@ -126,9 +126,6 @@ extension Signal {
 	}
 }
 
-/// A typealias for a `SignalChannel` where both ends are multi (i.e. SignalMultiInput -> SignalMulti). This is commonly used for basic "Reducer"-style implementations where you feed a `Message` type in, do something stateful in a custom stage in the middle and emit a `Notification` about the stateful change (commonly, the `Notification` is simply the state itself).
-public typealias Reducer<Message, Notification> = SignalChannel<Message, SignalMultiInput<Message>, Notification, SignalMulti<Notification>>
-
 // Implementation of Signal.swift
 extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<OutputValue> {
 	public func subscribe(context: Exec = .direct, handler: @escaping (Result<OutputValue>) -> Void) -> (input: Input, endpoint: SignalEndpoint<OutputValue>) {
@@ -219,6 +216,10 @@ extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<Output
 	
 	public func customActivation(initialValues: Array<OutputValue> = [], context: Exec = .direct, updater: @escaping (_ cachedValues: inout Array<OutputValue>, _ cachedError: inout Error?, _ incoming: Result<OutputValue>) -> Void) -> SignalChannel<InputValue, Input, OutputValue, SignalMulti<OutputValue>> {
 		return next { $0.customActivation(initialValues: initialValues, context: context, updater: updater) }
+	}
+	
+	public func reduce<State>(initialState: State, context: Exec = .direct, reducer: @escaping (_ state: inout State, _ message: OutputValue) throws -> State) -> SignalChannel<InputValue, Input, State, SignalMulti<State>> {
+		return next { $0.reduce(initialState: initialState, context: context, reducer: reducer) }
 	}
 	
 	public func capture() -> (input: Input, capture: SignalCapture<OutputValue>) {
@@ -735,8 +736,8 @@ extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<Output
 }
 
 extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<OutputValue> {
-	public func reduce<U>(_ initial: U, context: Exec = .direct, fold: @escaping (U, OutputValue) -> U) -> SignalChannel<InputValue, Input, U, Signal<U>> {
-		return next { $0.reduce(initial, context: context, fold: fold) }
+	public func aggregate<U>(_ initial: U, context: Exec = .direct, fold: @escaping (U, OutputValue) -> U) -> SignalChannel<InputValue, Input, U, Signal<U>> {
+		return next { $0.aggregate(initial, context: context, fold: fold) }
 	}
 }
 

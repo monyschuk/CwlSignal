@@ -519,16 +519,17 @@ public class Signal<Value> {
 	/// - Returns: a `SignalMulti<State>`
 	public final func reduce<State>(initialState: State, context: Exec = .direct, reducer: @escaping (_ state: inout State, _ message: Value) throws -> State) -> SignalMulti<State> {
 		return SignalMulti<State>(processor: attach { (s, dw) in
-			return SignalReducer<Value, State>(signal: s, state: Result<State>.success(initialState), dw: &dw, context: context) { (state: inout Result<State>, message: Result<Value>) throws -> State in
+            return SignalReducer<Value, State>(signal: s, state: Result<State>.success(initialState), dw: &dw, context: context) { (state: inout Result<State>, message: Result<Value>) -> Result<State> in
 				switch (state, message) {
-				case (.success(var s), .success(let m)):
-					let emitState = try reducer(&s, m)
-					state = .success(s)
-					return emitState
-				case (.failure(let e), _): throw e
+                case (.success(var s), .success(let m)):
+                    let output =  Result<State> { try reducer(&s, m) }
+                    state = .success(s)
+                    return output
+                case (.failure, _):
+                    return state
 				case (_, .failure(let e)):
 					state = .failure(e)
-					throw e
+                    return state
 				}
 			}
 		})
@@ -1139,7 +1140,8 @@ public class Signal<Value> {
 	fileprivate final func resumeIfPossibleInternal(dw: inout DeferredWork) {
 		if holdCount == 0, itemProcessing == false, !queue.isEmpty {
 			if !refreshItemContextInternal(&dw) {
-				preconditionFailure("Handler should not be nil if queue is not empty")
+				// The weakly held handler has asynchronously released.
+				return
 			}
 			itemProcessing = true
 			dw.append {
@@ -1464,7 +1466,8 @@ fileprivate protocol SignalPredecessor: class {
 	func outputDeactivatedSuccessorInternal(_ successor: AnyObject, dw: inout DeferredWork)
 	func outputAddedSuccessorInternal(_ successor: AnyObject, param: Any?, activationCount: Int?, dw: inout DeferredWork) throws
 	func outputRemovedSuccessorInternal(_ successor: AnyObject, dw: inout DeferredWork)
-	func precessorsSuccessorInternal(contains: SignalPredecessor) -> Bool
+	func predecessorsSuccessorInternal(loopCheck: AnyObject) -> Bool
+	var loopCheckValue: AnyObject { get }
 	func wrappedWithOrder(_ order: Int) -> OrderedSignalPredecessor
 }
 
@@ -1509,19 +1512,23 @@ fileprivate class SignalProcessor<Value, U>: SignalHandler<Value>, SignalPredece
 		return nil
 	}
 	
+	/// Identity used for checking loops (needs to be the mutex since the mutex is shared vertically through the graph, any traversal looking for potential loops could deadlock before noticing a loop with any other value)
+	fileprivate final var loopCheckValue: AnyObject { return signal.mutex }
+	
 	// Performs a depth-first graph traversal looking for the specified `SignalPredecessor`
 	//
 	// - Parameter contains: the search value
 	// - Returns: true if `contains` was found, false otherwise
-	func precessorsSuccessorInternal(contains: SignalPredecessor) -> Bool {
-		if contains === self {
+	func predecessorsSuccessorInternal(loopCheck: AnyObject) -> Bool {
+		// Only check the value when successors don't share the mutex (i.e. when we have a boundary of some kind).
+		if !successorsShareMutex && loopCheck === self.loopCheckValue {
 			return true
 		}
 		var result = false
 		runSuccesorAction {
 			// Don't need to traverse sortedPreceeding (unsorted is fine for an ancestor check)
 			for p in signal.preceeding {
-				if p.base.precessorsSuccessorInternal(contains: contains) {
+				if p.base.predecessorsSuccessorInternal(loopCheck: loopCheck) {
 					result = true
 					return
 				}
@@ -1695,7 +1702,7 @@ fileprivate class SignalProcessor<Value, U>: SignalHandler<Value>, SignalPredece
 			if needsPredecessorCheck, let predecessor = sccr.signalHandler as? SignalPredecessor {
 				// Don't need to traverse sortedPreceeding (unsorted is fine for an ancestor check)
 				for p in signal.preceeding {
-					if p.base.precessorsSuccessorInternal(contains: predecessor) {
+					if p.base.predecessorsSuccessorInternal(loopCheck: predecessor.loopCheckValue) {
 						// Throw an error here and trigger the preconditionFailure outside the lock (otherwise precondition catching tests may deadlock).
 						error = SignalJoinError<Value>.loop
 						dw.append { preconditionFailure("Signals must not be joined in a loop.") }
@@ -1890,7 +1897,7 @@ fileprivate final class SignalMultiProcessor<Value>: SignalProcessor<Value, Valu
 
 // Implementation of a processor that can output to multiple `Signal`s. Used by `continuous`, `continuous`, `playback`, `multicast`, `customActivation` and `preclosed`.
 fileprivate final class SignalReducer<Value, State>: SignalProcessor<Value, State>, SignalBlockable {
-	typealias Reducer = (_ state: inout Result<State>, _ message: Result<Value>) throws -> State
+    typealias Reducer = (_ state: inout Result<State>, _ message: Result<Value>) -> Result<State>
 	let reducer: Reducer
 	var state: Result<State>
 	
@@ -1933,8 +1940,8 @@ fileprivate final class SignalReducer<Value, State>: SignalProcessor<Value, Stat
 				
 				// Perform the update on the copy
 				let previous = state
-				_ = try? s.reducer(&state, r)
-				
+                _ = s.reducer(&state, r)
+
 				// Apply the change to the authoritative version under the mutex
 				s.sync {
 					s.state = state
@@ -1963,8 +1970,8 @@ fileprivate final class SignalReducer<Value, State>: SignalProcessor<Value, Stat
 				
 				// Perform the update on the copy
 				let previous = state
-				let result = Result<State> { try s.reducer(&state, r) }
-				
+                let result = s.reducer(&state, r)
+
 				// Apply the change to the authoritative version under the mutex
 				var outputs: OutputsArray = []
 				s.sync {
@@ -2956,6 +2963,14 @@ public enum SignalError: Error {
 	case timeout
 }
 
+/// A minor convenience SignalClosed = SignalError.closed
+public var SignalClosed: SignalError { return SignalError.closed }
+
+extension Result {
+	/// A minor convenience Result.signalClosed = Result.failure(SignalError.closed)
+	public static var signalClosed: Result<Value> { return Result.failure(SignalError.closed) }
+}
+
 /// Attempts to join a `SignalInput` to a joinable handler (`SignalMergeSet`, `SignalJunction` or `SignalCapture`) can fail in two different ways.
 /// - cancelled: the destination `SignalInput`/`SignalMergeSet` was no longer the active input for its `Signal` (either its `Signal` is joined to something else or `Signal` has been deactivated, invalidating old inputs)
 /// - duplicate(`SignalInput<Value>`): the source `Signal` already had an output connected and doesn't support multiple outputs so the join failed. If the join destination was a `SignalInput` then that `SignalInput` was consumed by the attempt so the associated value will be a new `SignalInput` replacing the old one. If the join destination was a `SignalMergeSet`, the associated value will be `nil`.
@@ -2994,3 +3009,4 @@ public enum EitherResult5<U, V, W, X, Y> {
 	case result4(Result<X>)
 	case result5(Result<Y>)
 }
+

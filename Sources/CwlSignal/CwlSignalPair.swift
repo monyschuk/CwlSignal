@@ -65,9 +65,6 @@ public struct SignalChannel<IV, I: SignalInput<IV>, OV, O: Signal<OV>>: SignalPa
 	public init(input: Input, signal: Output) {
 		(self.input, self.signal) = (input, signal)
 	}
-	public init(_ tuple: (Input, Output)) {
-		self.init(input: tuple.0, signal: tuple.1)
-	}
 }
 
 extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<OutputValue> {
@@ -96,21 +93,24 @@ public typealias MergedChannel<Value> = SignalChannel<Value, SignalMergedInput<V
 extension SignalChannel where IV == OV, I == SignalInput<IV>, O == Signal<OV> {
 	// An empty Channel can be default constructed
 	public init() {
-		self.init(Signal<InputValue>.create())
+		let (input, signal) = Signal<InputValue>.create()
+		self.init(input: input, signal: signal)
 	}
 }
 
 extension SignalChannel where InputValue == OutputValue, Input == SignalMultiInput<InputValue>, Output == Signal<OutputValue> {
 	// An empty MultiChannel can be default constructed
 	public init() {
-		self.init(Signal<InputValue>.createMultiInput())
+		let (input, signal) = Signal<InputValue>.createMultiInput()
+		self.init(input: input, signal: signal)
 	}
 }
 
 extension SignalChannel where InputValue == OutputValue, Input == SignalMergedInput<InputValue>, Output == Signal<OutputValue> {
 	// An empty MergedChannel can be default constructed
 	public init() {
-		self.init(Signal<InputValue>.createMergedInput())
+		let (input, signal) = Signal<InputValue>.createMergedInput()
+		self.init(input: input, signal: signal)
 	}
 }
 
@@ -206,15 +206,20 @@ extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<Output
 		return next { $0.playback() }
 	}
 	
-	public func cacheUntilActive() -> SignalChannel<InputValue, Input, OutputValue, SignalMulti<OutputValue>> {
-		return next { $0.playback() }
+	public func cacheUntilActive() -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> {
+		return next { $0.cacheUntilActive() }
 	}
 	
 	public func multicast() -> SignalChannel<InputValue, Input, OutputValue, SignalMulti<OutputValue>> {
-		return next { $0.playback() }
+		return next { $0.multicast() }
 	}
 	
-	public func customActivation(initialValues: Array<OutputValue> = [], context: Exec = .direct, updater: @escaping (_ cachedValues: inout Array<OutputValue>, _ cachedError: inout Error?, _ incoming: Result<OutputValue>) -> Void) -> SignalChannel<InputValue, Input, OutputValue, SignalMulti<OutputValue>> {
+    public func multicast(_ output: (SignalMulti<OutputValue>) -> ()) -> Input {
+        output(signal.multicast())
+        return input
+    }
+
+    public func customActivation(initialValues: Array<OutputValue> = [], context: Exec = .direct, updater: @escaping (_ cachedValues: inout Array<OutputValue>, _ cachedError: inout Error?, _ incoming: Result<OutputValue>) -> Void) -> SignalChannel<InputValue, Input, OutputValue, SignalMulti<OutputValue>> {
 		return next { $0.customActivation(initialValues: initialValues, context: context, updater: updater) }
 	}
 	
@@ -372,6 +377,10 @@ extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<Output
 		return next { $0.groupBy(context: context, processor) }
 	}
 	
+	public func mapErrors(context: Exec = .direct, _ processor: @escaping (Error) -> Error) -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> {
+		return next { $0.mapErrors(context: context, processor) }
+	}
+
 	public func map<U>(context: Exec = .direct, _ processor: @escaping (OutputValue) -> U) -> SignalChannel<InputValue, Input, U, Signal<U>> {
 		return next { $0.map(context: context, processor) }
 	}
@@ -456,14 +465,6 @@ extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<Output
 		return next { $0.ignoreElements() }
 	}
 	
-	public func ignoreElements<S: Sequence>(endWith: @escaping (Error) -> (S, Error)?) -> SignalChannel<InputValue, Input, S.Iterator.Element, Signal<S.Iterator.Element>> {
-		return next { $0.ignoreElements(endWith: endWith) }
-	}
-	
-	public func ignoreElements<U>(endWith value: U, conditional: @escaping (Error) -> Error? = { e in e }) -> SignalChannel<InputValue, Input, U, Signal<U>> {
-		return next { $0.ignoreElements(endWith: value, conditional: conditional) }
-	}
-	
 	public func last(context: Exec = .direct, matching: @escaping (OutputValue) -> Bool = { _ in true }) -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> {
 		return next { $0.last(context: context, matching: matching) }
 	}
@@ -539,11 +540,11 @@ extension SignalPair where Input: SignalInput<InputValue>, Output: Signal<Output
 		return next { $0.startWith(sequence) }
 	}
 	
-	public func endWith<U: Sequence>(_ sequence: U, conditional: @escaping (Error) -> Error? = { e in e }) -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> where U.Iterator.Element == OutputValue {
+	public func endWith<U: Sequence>(_ sequence: @autoclosure @escaping () -> U, conditional: @escaping (Error) -> Error? = { e in e }) -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> where U.Iterator.Element == OutputValue {
 		return next { $0.endWith(sequence, conditional: conditional) }
 	}
 	
-	func endWith(_ value: OutputValue, conditional: @escaping (Error) -> Error? = { e in e }) -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> {
+	func endWith(_ value: @autoclosure @escaping () -> OutputValue, conditional: @escaping (Error) -> Error? = { e in e }) -> SignalChannel<InputValue, Input, OutputValue, Signal<OutputValue>> {
 		return next { $0.endWith(value, conditional: conditional) }
 	}
 	

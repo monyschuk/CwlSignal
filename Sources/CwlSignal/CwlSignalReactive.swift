@@ -717,6 +717,21 @@ extension Signal {
 	///
 	/// - Parameters:
 	///   - context: the `Exec` where `processor` will be evaluated (default: .direct).
+	///   - processor: used to transform the closing error 
+	/// - Returns: when an error is emitted from `self`, emits the result returned from passing that error into `processor`. All values emitted normally.
+	public func mapErrors(context: Exec = .direct, _ processor: @escaping (Error) -> Error) -> Signal<Value> {
+		return transform(context: context) { (r: Result<Value>, n: SignalNext<Value>) in
+			switch r {
+			case .success(let v): n.send(value: v)
+			case .failure(let e): n.send(error: processor(e))
+			}
+		}
+	}
+	
+	/// Implementation of [Reactive X operator "Map"](http://reactivex.io/documentation/operators/map.html)
+	///
+	/// - Parameters:
+	///   - context: the `Exec` where `processor` will be evaluated (default: .direct).
 	///   - processor: for each value emitted by `self`, outputs a value for the output `Signal`
 	/// - Returns: a `Signal` where all the values have been transformed by the `processor`. Any error is emitted in the output without change.
 	public func map<U>(context: Exec = .direct, _ processor: @escaping (Value) -> U) -> Signal<U> {
@@ -988,7 +1003,9 @@ extension Signal where Value: Hashable {
 			}
 		}
 	}
-	
+}
+
+extension Signal where Value: Equatable {
 	/// Implementation of [Reactive X operator "distinct"](http://reactivex.io/documentation/operators/distinct.html)
 	///
 	/// - Returns: a signal that emits the first value but then emits subsequent values only when they are different to the previous value.
@@ -1139,60 +1156,6 @@ extension Signal {
 		return transform { (r: Result<Value>, n: SignalNext<Value>) -> Void in
 			if case .failure = r {
 				n.send(result: r)
-			}
-		}
-	}
-	
-	/// Implementation of [Reactive X operator "ignoreElements"](http://reactivex.io/documentation/operators/ignoreelements.html)
-	///
-	/// - Returns: a signal that emits the input error, when received, otherwise ignores all values.
-	public func ignoreElements<S: Sequence>(endWith: @escaping (Error) -> (S, Error)?) -> Signal<S.Iterator.Element> {
-		return transform() { (r: Result<Value>, n: SignalNext<S.Iterator.Element>) in
-			switch r {
-			case .success: break
-			case .failure(let e):
-				if let (sequence, err) = endWith(e) {
-					sequence.forEach { n.send(value: $0) }
-					n.send(error: err)
-				} else {
-					n.send(error: e)
-				}
-			}
-		}
-	}
-	
-	/// Implementation of [Reactive X operator "ignoreElements"](http://reactivex.io/documentation/operators/ignoreelements.html)
-	///
-	/// - Returns: a signal that emits the input error, when received, otherwise ignores all values.
-	func ignoreElements<U>(endWith value: @autoclosure @escaping () -> U, conditional: @escaping (Error) -> Error? = { $0 }) -> Signal<U> {
-		return transform() { (r: Result<Value>, n: SignalNext<U>) in
-			switch r {
-			case .success: break
-			case .failure(let e):
-				if let err = conditional(e) {
-					n.send(value: value())
-					n.send(error: err)
-				} else {
-					n.send(error: e)
-				}
-			}
-		}
-	}
-	
-	/// Implementation of [Reactive X operator "ignoreElements"](http://reactivex.io/documentation/operators/ignoreelements.html)
-	///
-	/// - Returns: a signal that emits the input error, when received, otherwise ignores all values.
-	func ignoreElements<U>(ifSuccessfulEndWith value: @autoclosure @escaping () -> U) -> Signal<U> {
-		return transform() { (r: Result<Value>, n: SignalNext<U>) in
-			switch r {
-			case .success: break
-			case .failure(let e):
-				if e.isSignalClosed {
-					n.send(value: value())
-					n.send(error: e)
-				} else {
-					n.send(error: e)
-				}
 			}
 		}
 	}
@@ -1601,13 +1564,13 @@ extension Signal {
 	/// Implementation of [Reactive X operator "endWith"](http://reactivex.io/documentation/operators/endwith.html)
 	///
 	/// - Returns: a signal that emits every value from `sequence` on activation and then mirrors `self`.
-	public func endWith<U: Sequence>(_ sequence: U, conditional: @escaping (Error) -> Error? = { e in e }) -> Signal<Value> where U.Iterator.Element == Value {
+	public func endWith<U: Sequence>(_ sequence: @autoclosure @escaping () -> U, conditional: @escaping (Error) -> Error? = { e in e }) -> Signal<Value> where U.Iterator.Element == Value {
 		return transform() { (r: Result<Value>, n: SignalNext<Value>) in
 			switch r {
 			case .success(let v): n.send(value: v)
 			case .failure(let e):
 				if let newEnd = conditional(e) {
-					sequence.forEach { n.send(value: $0) }
+					sequence().forEach { n.send(value: $0) }
 					n.send(error: newEnd)
 				} else {
 					n.send(error: e)
@@ -1619,13 +1582,13 @@ extension Signal {
 	/// Implementation of [Reactive X operator "endWith"](http://reactivex.io/documentation/operators/endwith.html)
 	///
 	/// - Returns: a signal that emits every value from `sequence` on activation and then mirrors `self`.
-	public func endWith(_ value: Value, conditional: @escaping (Error) -> Error? = { e in e }) -> Signal<Value> {
+	public func endWith(_ value: @autoclosure @escaping () -> Value, conditional: @escaping (Error) -> Error? = { e in e }) -> Signal<Value> {
 		return transform() { (r: Result<Value>, n: SignalNext<Value>) in
 			switch r {
 			case .success(let v): n.send(value: v)
 			case .failure(let e):
 				if let newEnd = conditional(e) {
-					n.send(value: value)
+					n.send(value: value())
 					n.send(error: newEnd)
 				} else {
 					n.send(error: e)
@@ -2114,13 +2077,16 @@ extension Signal {
 	///   - handler: invoked when self is activated
 	/// - Returns: a signal that emits the same outputs as self
 	public func onActivate(context: Exec = .direct, handler: @escaping () -> ()) -> Signal<Value> {
-		let signal = Signal<Value>.generate { input in
-			if let i = input {
-				handler()
-				self.join(to: i)
-			}
-		}
-		return signal
+        let j = self.junction()
+        let signal = Signal<Value>.generate { input in
+            if let i = input {
+                handler()
+                _ = try? j.join(to: i)
+            } else {
+                _ = j.disconnect()
+            }
+        }
+        return signal
 	}
 	
 	/// Implementation of [Reactive X operator "do"](http://reactivex.io/documentation/operators/do.html) for "deactivation" (not a concept that directly exists in ReactiveX but similar to doOnUnsubscribe).
@@ -2130,14 +2096,16 @@ extension Signal {
 	///   - handler: invoked when self is deactivated
 	/// - Returns: a signal that emits the same outputs as self
 	public func onDeactivate(context: Exec = .direct, handler: @escaping () -> ()) -> Signal<Value> {
-		let signal = Signal<Value>.generate { input in
-			if let i = input {
-				self.join(to: i)
-			} else {
-				handler()
-			}
-		}
-		return signal
+        let j = self.junction()
+        let signal = Signal<Value>.generate { input in
+            if let i = input {
+                _ = try? j.join(to: i)
+            } else {
+                handler()
+                _ = j.disconnect()
+            }
+        }
+        return signal
 	}
 	
 	/// Implementation of [Reactive X operator "do"](http://reactivex.io/documentation/operators/do.html) for "result" (equivalent to doOnEach).

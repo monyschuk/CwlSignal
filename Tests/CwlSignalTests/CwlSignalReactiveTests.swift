@@ -52,7 +52,7 @@ class SignalReactiveTests: XCTestCase {
 		let ep = signal.subscribe { r in results.append(r) }
 		let (values, error) = capture.activation()
 		do {
-			try capture.join(to: input)
+			try capture.bind(to: input)
 		} catch {
 			input.send(error: error)
 		}
@@ -64,7 +64,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 5)
 		XCTAssert(results.at(3)?.value == 7)
 		XCTAssert(results.at(4)?.value == 11)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testToSequence() {
@@ -81,13 +81,13 @@ class SignalReactiveTests: XCTestCase {
 
 		sequence.cancel()
 		XCTAssert(sequence.next() == nil)
-		XCTAssert(sequence.error as? SignalError == SignalError.cancelled)
+		XCTAssert(sequence.error as? SignalComplete == .cancelled)
 	}
 	
 	func testInterval() {
 		var results = [Result<Int>]()
 		let coordinator = DebugContextCoordinator()
-		let ep = intervalSignal(.fromSeconds(0.01), context: coordinator.direct).subscribe { r in
+		let ep = Signal.interval(.fromSeconds(0.01), context: coordinator.direct).subscribe { r in
 			results.append(r)
 			if let v = r.value, v == 3 {
 				coordinator.stop()
@@ -100,7 +100,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
 		XCTAssert(results.at(3)?.value == 3)
-		XCTAssert(results.at(4)?.error as? SignalError == .cancelled)
+		XCTAssert(results.at(4)?.error as? SignalComplete == .cancelled)
 		XCTAssert(coordinator.currentTime == 40_000_000)
 	}
 	
@@ -122,7 +122,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(12)?.value == 5)
 		XCTAssert(results.at(13)?.value == 7)
 		XCTAssert(results.at(14)?.value == 11)
-		XCTAssert(results.at(15)?.isSignalClosed == true)
+		XCTAssert(results.at(15)?.isSignalComplete == true)
 	}
 	
 	func testStart() {
@@ -130,7 +130,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.start() { 5 }.subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 5)
-		XCTAssert(results.at(1)?.isSignalClosed == true)
+		XCTAssert(results.at(1)?.isSignalComplete == true)
 	}
 	
 	func testTimer() {
@@ -149,8 +149,8 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(coordinator.currentTime == 10_000_000)
 		XCTAssert(results.count == 3)
 		XCTAssert(results.at(0)?.value == 5)
-		XCTAssert(results.at(1)?.isSignalClosed == true)
-		XCTAssert(results.at(2)?.isSignalClosed == true)
+		XCTAssert(results.at(1)?.isSignalComplete == true)
+		XCTAssert(results.at(2)?.isSignalComplete == true)
 	}
 	
 	func testBufferCount() {
@@ -166,7 +166,7 @@ class SignalReactiveTests: XCTestCase {
 			XCTAssert(results.at(2)?.value.map { (v: [Int]) -> Bool in v == [5, 6, 7] } == true)
 			XCTAssert(results.at(3)?.value.map { (v: [Int]) -> Bool in v == [7, 8, 9] } == true)
 			XCTAssert(results.at(4)?.value.map { (v: [Int]) -> Bool in v == [9, 10] } == true)
-			XCTAssert(results.at(5)?.isSignalClosed == true)
+			XCTAssert(results.at(5)?.isSignalComplete == true)
 		}
 
 		do {
@@ -180,7 +180,7 @@ class SignalReactiveTests: XCTestCase {
 			XCTAssert(results.at(1)?.value.map { (v: [Int]) -> Bool in v == [4, 5, 6] } == true)
 			XCTAssert(results.at(2)?.value.map { (v: [Int]) -> Bool in v == [7, 8, 9] } == true)
 			XCTAssert(results.at(3)?.value.map { (v: [Int]) -> Bool in v == [10] } == true)
-			XCTAssert(results.at(4)?.isSignalClosed == true)
+			XCTAssert(results.at(4)?.isSignalComplete == true)
 		}
 	}
 	
@@ -239,7 +239,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.count == 3)
 		XCTAssert(results.at(0)?.value.map { (v: [Int]) -> Bool in v == [1, 2, 3, 4] } == true)
 		XCTAssert(results.at(1)?.value.map { (v: [Int]) -> Bool in v == [12, 13, 14, 15] } == true)
-		XCTAssert(results.at(2)?.isSignalClosed == true)
+		XCTAssert(results.at(2)?.isSignalComplete == true)
 
 
 		XCTAssert(coordinator.currentTime == 9_000_000_000)
@@ -294,7 +294,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(29)?.value == 9)
 		XCTAssert(results.at(30)?.value == 10)
 		XCTAssert(results.at(31)?.value == 11)
-		XCTAssert(results.at(32)?.error as? SignalError == .closed)
+		XCTAssert(results.at(32)?.error as? SignalComplete == .closed)
 	}
 
 	func testFlatMapOuterError() {
@@ -357,7 +357,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results1.at(5)?.value == 5)
 		XCTAssert(results1.at(6)?.value == 6)
 		XCTAssert(results1.at(7)?.value == 7)
-		XCTAssert(results1.at(8)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(8)?.error as? SignalComplete == .closed)
 		
 		ep1.cancel()
 	}
@@ -441,7 +441,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(29)?.value == 13)
 		XCTAssert(results.at(30)?.value == 14)
 		XCTAssert(results.at(31)?.value == 15)
-		XCTAssert(results.at(32)?.error as? SignalError == .closed)
+		XCTAssert(results.at(32)?.error as? SignalComplete == .closed)
 	}
 	
 	func testFlatMapFirst() {
@@ -463,7 +463,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 3)
 		XCTAssert(results.at(1)?.value == 4)
 		XCTAssert(results.at(2)?.value == 5)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testFlatMapLatest() {
@@ -491,7 +491,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(6)?.value == 7)
 		XCTAssert(results.at(7)?.value == 8)
 		XCTAssert(results.at(8)?.value == 9)
-		XCTAssert(results.at(9)?.error as? SignalError == .closed)
+		XCTAssert(results.at(9)?.error as? SignalComplete == .closed)
 	}
 	
 	func testConcatMap() {
@@ -574,7 +574,7 @@ class SignalReactiveTests: XCTestCase {
 					results[v.0]!.append(r)
 				}
 			} else {
-				XCTAssert(r.isSignalClosed)
+				XCTAssert(r.isSignalComplete)
 			}
 		}
 		XCTAssert(results.count == 3)
@@ -588,7 +588,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r1?.at(3)?.value == 12)
 		XCTAssert(r1?.at(4)?.value == 15)
 		XCTAssert(r1?.at(5)?.value == 18)
-		XCTAssert(r1?.at(6)?.isSignalClosed == true)
+		XCTAssert(r1?.at(6)?.isSignalComplete == true)
 		XCTAssert(r2?.count == 8)
 		XCTAssert(r2?.at(0)?.value == 1)
 		XCTAssert(r2?.at(1)?.value == 4)
@@ -597,7 +597,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r2?.at(4)?.value == 13)
 		XCTAssert(r2?.at(5)?.value == 16)
 		XCTAssert(r2?.at(6)?.value == 19)
-		XCTAssert(r2?.at(7)?.isSignalClosed == true)
+		XCTAssert(r2?.at(7)?.isSignalComplete == true)
 		XCTAssert(r3?.count == 8)
 		XCTAssert(r3?.at(0)?.value == 2)
 		XCTAssert(r3?.at(1)?.value == 5)
@@ -606,7 +606,16 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r3?.at(4)?.value == 14)
 		XCTAssert(r3?.at(5)?.value == 17)
 		XCTAssert(r3?.at(6)?.value == 20)
-		XCTAssert(r3?.at(7)?.isSignalClosed == true)
+		XCTAssert(r3?.at(7)?.isSignalComplete == true)
+	}
+	
+	func testFilterOptionals() {
+		var results = [Result<Int>]()
+		_ = Signal<Int?>.from(values: [1, nil, 2, nil]).filterOptionals().subscribe { r in results.append(r) }
+		XCTAssert(results.count == 3)
+		XCTAssert(results.at(0)?.value == 1)
+		XCTAssert(results.at(1)?.value == 2)
+		XCTAssert(results.at(2)?.isSignalComplete == true)
 	}
 	
 	func testFilterMap() {
@@ -621,7 +630,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.count == 3)
 		XCTAssert(results.at(0)?.value == 4)
 		XCTAssert(results.at(1)?.value == 8)
-		XCTAssert(results.at(2)?.isSignalClosed == true)
+		XCTAssert(results.at(2)?.isSignalComplete == true)
 	}
 
 	func testMap() {
@@ -633,7 +642,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 6)
 		XCTAssert(results.at(3)?.value == 8)
 		XCTAssert(results.at(4)?.value == 10)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testMapWithState() {
@@ -648,7 +657,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 9)
 		XCTAssert(results.at(3)?.value == 12)
 		XCTAssert(results.at(4)?.value == 15)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testScan() {
@@ -662,7 +671,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 8)
 		XCTAssert(results.at(3)?.value == 12)
 		XCTAssert(results.at(4)?.value == 17)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testWindowInterval() {
@@ -677,7 +686,7 @@ class SignalReactiveTests: XCTestCase {
 						results[index].append(r)
 					}
 				} else {
-					XCTAssert(r.isSignalClosed)
+					XCTAssert(r.isSignalComplete)
 				}
 			}
 		}
@@ -698,14 +707,14 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r1?.at(2)?.value == 3)
 		XCTAssert(r1?.at(3)?.value == 4)
 		XCTAssert(r1?.at(4)?.value == 5)
-		XCTAssert(r1?.at(5)?.isSignalClosed == true)
+		XCTAssert(r1?.at(5)?.isSignalComplete == true)
 		XCTAssert(r2?.count == 6)
 		XCTAssert(r2?.at(0)?.value == 6)
 		XCTAssert(r2?.at(1)?.value == 7)
 		XCTAssert(r2?.at(2)?.value == 8)
 		XCTAssert(r2?.at(3)?.value == 9)
 		XCTAssert(r2?.at(4)?.value == 10)
-		XCTAssert(r2?.at(5)?.isSignalClosed == true)
+		XCTAssert(r2?.at(5)?.isSignalComplete == true)
 		XCTAssert(r3?.count == 2)
 		XCTAssert(r3?.at(0)?.value == 11)
 		XCTAssert(r3?.at(1)?.value == 12)
@@ -716,7 +725,7 @@ class SignalReactiveTests: XCTestCase {
 		let r4 = results.at(3)
 		XCTAssert(r4?.count == 2)
 		XCTAssert(r4?.at(0)?.value == 13)
-		XCTAssert(r4?.at(1)?.error as? SignalError == .cancelled)
+		XCTAssert(r4?.at(1)?.error as? SignalComplete == .cancelled)
 		
 		withExtendedLifetime(ep) { }
 		withExtendedLifetime(delay) { }
@@ -727,8 +736,8 @@ class SignalReactiveTests: XCTestCase {
 		var results = Array<Array<Result<Int>>>()
 		let coordinator = DebugContextCoordinator()
 		
-		let baseSignal = intervalSignal(.fromSeconds(0.03), context: coordinator.global)
-		let windowedSignal = baseSignal.window(windows: intervalSignal(.fromSeconds(0.2), initial: .fromSeconds(0.0499), context: coordinator.global).map { _ in
+		let baseSignal = Signal.interval(.fromSeconds(0.03), context: coordinator.global)
+		let windowedSignal = baseSignal.window(windows: Signal.interval(.fromSeconds(0.2), initial: .fromSeconds(0.0499), context: coordinator.global).map { _ in
 			Signal<()>.timer(interval: .fromSeconds(0.1), context: coordinator.global)
 		})
 		let ep = windowedSignal.subscribe { r in
@@ -756,23 +765,23 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r1?.at(0)?.value == 1)
 		XCTAssert(r1?.at(1)?.value == 2)
 		XCTAssert(r1?.at(2)?.value == 3)
-		XCTAssert(r1?.at(3)?.isSignalClosed == true)
+		XCTAssert(r1?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r2?.count == 4)
 		XCTAssert(r2?.at(0)?.value == 8)
 		XCTAssert(r2?.at(1)?.value == 9)
 		XCTAssert(r2?.at(2)?.value == 10)
-		XCTAssert(r2?.at(3)?.isSignalClosed == true)
+		XCTAssert(r2?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r3?.count == 5)
 		XCTAssert(r3?.at(0)?.value == 14)
 		XCTAssert(r3?.at(1)?.value == 15)
 		XCTAssert(r3?.at(2)?.value == 16)
 		XCTAssert(r3?.at(3)?.value == 17)
-		XCTAssert(r3?.at(4)?.isSignalClosed == true)
+		XCTAssert(r3?.at(4)?.isSignalComplete == true)
 
 		XCTAssert(r4?.count == 1)
-		XCTAssert(r4?.at(0)?.isSignalClosed == true)
+		XCTAssert(r4?.at(0)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) { }
 	}
@@ -781,7 +790,7 @@ class SignalReactiveTests: XCTestCase {
 		var results = Array<Array<Result<Int>>>()
 		let coordinator = DebugContextCoordinator()
 		
-		let baseSignal = intervalSignal(.fromSeconds(0.03), context: coordinator.global).timeout(interval: .fromSeconds(0.34), resetOnValue: false, context: coordinator.global)
+		let baseSignal = Signal.interval(.fromSeconds(0.03), context: coordinator.global).timeout(interval: .fromSeconds(0.34), resetOnValue: false, context: coordinator.global)
 		let windowedSignal = baseSignal.window(interval: .fromSeconds(0.091), timeshift: .fromSeconds(0.151), context: coordinator.global)
 		let ep = windowedSignal.subscribe { r in
 			if let v = r.value {
@@ -804,17 +813,17 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r1?.at(0)?.value == 0)
 		XCTAssert(r1?.at(1)?.value == 1)
 		XCTAssert(r1?.at(2)?.value == 2)
-		XCTAssert(r1?.at(3)?.isSignalClosed == true)
+		XCTAssert(r1?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r2?.count == 4)
 		XCTAssert(r2?.at(0)?.value == 5)
 		XCTAssert(r2?.at(1)?.value == 6)
 		XCTAssert(r2?.at(2)?.value == 7)
-		XCTAssert(r2?.at(3)?.isSignalClosed == true)
+		XCTAssert(r2?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r3?.count == 2)
 		XCTAssert(r3?.at(0)?.value == 10)
-		XCTAssert(r3?.at(1)?.error as? SignalError == .cancelled)
+		XCTAssert(r3?.at(1)?.error as? SignalComplete == .cancelled)
 		
 		withExtendedLifetime(ep) { }
 	}
@@ -823,7 +832,7 @@ class SignalReactiveTests: XCTestCase {
 		var results = Array<Array<Result<Int>>>()
 		let coordinator = DebugContextCoordinator()
 		
-		let baseSignal = intervalSignal(.fromSeconds(0.03), context: coordinator.global)
+		let baseSignal = Signal.interval(.fromSeconds(0.03), context: coordinator.global)
 		let windowedSignal = baseSignal.window(count: 3, skip: 5)
 		let ep = windowedSignal.subscribe { r in
 			if let v = r.value {
@@ -849,17 +858,17 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r1?.at(0)?.value == 0)
 		XCTAssert(r1?.at(1)?.value == 1)
 		XCTAssert(r1?.at(2)?.value == 2)
-		XCTAssert(r1?.at(3)?.isSignalClosed == true)
+		XCTAssert(r1?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r2?.count == 4)
 		XCTAssert(r2?.at(0)?.value == 5)
 		XCTAssert(r2?.at(1)?.value == 6)
 		XCTAssert(r2?.at(2)?.value == 7)
-		XCTAssert(r2?.at(3)?.isSignalClosed == true)
+		XCTAssert(r2?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r3?.count == 2)
 		XCTAssert(r3?.at(0)?.value == 10)
-		XCTAssert(r3?.at(1)?.error as? SignalError == .cancelled)
+		XCTAssert(r3?.at(1)?.error as? SignalComplete == .cancelled)
 		
 		withExtendedLifetime(ep) { }
 	}
@@ -868,7 +877,7 @@ class SignalReactiveTests: XCTestCase {
 		var results = Array<Array<Result<Int>>>()
 		let coordinator = DebugContextCoordinator()
 		
-		let baseSignal = intervalSignal(.fromSeconds(0.03), context: coordinator.global)
+		let baseSignal = Signal.interval(.fromSeconds(0.03), context: coordinator.global)
 		let windowedSignal = baseSignal.window(count: 3)
 		let ep = windowedSignal.subscribe { r in
 			if let v = r.value {
@@ -894,17 +903,17 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(r1?.at(0)?.value == 0)
 		XCTAssert(r1?.at(1)?.value == 1)
 		XCTAssert(r1?.at(2)?.value == 2)
-		XCTAssert(r1?.at(3)?.isSignalClosed == true)
+		XCTAssert(r1?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r2?.count == 4)
 		XCTAssert(r2?.at(0)?.value == 3)
 		XCTAssert(r2?.at(1)?.value == 4)
 		XCTAssert(r2?.at(2)?.value == 5)
-		XCTAssert(r2?.at(3)?.isSignalClosed == true)
+		XCTAssert(r2?.at(3)?.isSignalComplete == true)
 
 		XCTAssert(r3?.count == 2)
 		XCTAssert(r3?.at(0)?.value == 6)
-		XCTAssert(r3?.at(1)?.error as? SignalError == .cancelled)
+		XCTAssert(r3?.at(1)?.error as? SignalComplete == .cancelled)
 		
 		withExtendedLifetime(ep) { }
 	}
@@ -938,7 +947,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 10)
 		XCTAssert(results.at(3)?.value == 12)
 		XCTAssert(results.at(4)?.value == 14)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testThrottleFirst() {
@@ -970,7 +979,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 8)
 		XCTAssert(results.at(3)?.value == 11)
 		XCTAssert(results.at(4)?.value == 13)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testDistinct() {
@@ -985,7 +994,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(3)?.value == 3)
 		XCTAssert(results.at(4)?.value == 5)
 		XCTAssert(results.at(5)?.value == 7)
-		XCTAssert(results.at(6)?.isSignalClosed == true)
+		XCTAssert(results.at(6)?.isSignalComplete == true)
 	}
 	
 	func testDistinctUntilChanged() {
@@ -1000,7 +1009,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(3)?.value == 1)
 		XCTAssert(results.at(4)?.value == 0)
 		XCTAssert(results.at(5)?.value == 7)
-		XCTAssert(results.at(6)?.isSignalClosed == true)
+		XCTAssert(results.at(6)?.isSignalComplete == true)
 	}
 	
 	func testDistinctUntilChangedWithComparator() {
@@ -1013,7 +1022,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value == 0)
 		XCTAssert(results.at(2)?.value == 3)
 		XCTAssert(results.at(3)?.value == 5)
-		XCTAssert(results.at(4)?.isSignalClosed == true)
+		XCTAssert(results.at(4)?.isSignalComplete == true)
 	}
 	
 	func testElementAt() {
@@ -1023,14 +1032,14 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r0.count == 2)
 		XCTAssert(r0.at(0)?.value == 8)
-		XCTAssert(r0.at(1)?.isSignalClosed == true)
+		XCTAssert(r0.at(1)?.isSignalComplete == true)
 		
 		var r1 = [Result<Int>]()
-		_ = Signal<Int>.preclosed(values: [12, 13, 14, 15, 16], error: SignalError.cancelled).elementAt(5).subscribe { (r: Result<Int>) -> Void in
+		_ = Signal<Int>.preclosed(values: [12, 13, 14, 15, 16], error: SignalComplete.cancelled).elementAt(5).subscribe { (r: Result<Int>) -> Void in
 			r1.append(r)
 		}
 		XCTAssert(r1.count == 1)
-		XCTAssert(r1.at(0)?.error as? SignalError == SignalError.cancelled)
+		XCTAssert(r1.at(0)?.error as? SignalComplete == .cancelled)
 	}
 	
 	func testFilter() {
@@ -1046,7 +1055,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(4)?.value == 6)
 		XCTAssert(results.at(5)?.value == 0)
 		XCTAssert(results.at(6)?.value == 2)
-		XCTAssert(results.at(7)?.isSignalClosed == true)
+		XCTAssert(results.at(7)?.isSignalComplete == true)
 	}
 	
 	func testOfType() {
@@ -1058,7 +1067,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.count == 3)
 		XCTAssert(results.at(0)?.value == "hello")
 		XCTAssert(results.at(1)?.value == "world")
-		XCTAssert(results.at(2)?.isSignalClosed == true)
+		XCTAssert(results.at(2)?.isSignalComplete == true)
 	}
 	
 	func testFirst() {
@@ -1068,7 +1077,7 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r0.count == 2)
 		XCTAssert(r0.at(0)?.value == 5)
-		XCTAssert(r0.at(1)?.isSignalClosed == true)
+		XCTAssert(r0.at(1)?.isSignalComplete == true)
 		
 		var r1 = [Result<Int>]()
 		_ = Signal.from(values: [5, 6, 7, 8, 9, 10]).first() { v in v > 7 }.subscribe { (r: Result<Int>) -> Void in
@@ -1076,7 +1085,7 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r1.count == 2)
 		XCTAssert(r1.at(0)?.value == 8)
-		XCTAssert(r1.at(1)?.isSignalClosed == true)
+		XCTAssert(r1.at(1)?.isSignalComplete == true)
 	}
 	
 	func testSingle() {
@@ -1085,7 +1094,7 @@ class SignalReactiveTests: XCTestCase {
 			r0.append(r)
 		}
 		XCTAssert(r0.count == 1)
-		XCTAssert(r0.at(0)?.isSignalClosed == true)
+		XCTAssert(r0.at(0)?.isSignalComplete == true)
 		
 		var r1 = [Result<Int>]()
 		_ = Signal.from(values: [5, 6, 7, 8, 9, 10]).single { $0 == 7 }.subscribe { (r: Result<Int>) -> Void in
@@ -1093,21 +1102,21 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r1.count == 2)
 		XCTAssert(r1.at(0)?.value == 7)
-		XCTAssert(r1.at(1)?.isSignalClosed == true)
+		XCTAssert(r1.at(1)?.isSignalComplete == true)
 		
 		var r2 = [Result<Int>]()
 		_ = Signal.from(values: [5, 6, 8, 9, 10]).single { $0 == 7 }.subscribe { (r: Result<Int>) -> Void in
 			r2.append(r)
 		}
 		XCTAssert(r2.count == 1)
-		XCTAssert(r2.at(0)?.isSignalClosed == true)
+		XCTAssert(r2.at(0)?.isSignalComplete == true)
 		
 		var r3 = [Result<Int>]()
 		_ = Signal.from(values: [5, 6, 8, 9, 10]).single().subscribe { (r: Result<Int>) -> Void in
 			r3.append(r)
 		}
 		XCTAssert(r3.count == 1)
-		XCTAssert(r3.at(0)?.isSignalClosed == true)
+		XCTAssert(r3.at(0)?.isSignalComplete == true)
 		
 		var r4 = [Result<Int>]()
 		_ = Signal.from(values: [5]).single().subscribe { (r: Result<Int>) -> Void in
@@ -1115,7 +1124,7 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r4.count == 2)
 		XCTAssert(r4.at(0)?.value == 5)
-		XCTAssert(r4.at(1)?.isSignalClosed == true)
+		XCTAssert(r4.at(1)?.isSignalComplete == true)
 	}
 	
 	func testIgnoreElements() {
@@ -1124,7 +1133,7 @@ class SignalReactiveTests: XCTestCase {
 			results.append(r)
 		}
 		XCTAssert(results.count == 1)
-		XCTAssert(results.at(0)?.isSignalClosed == true)
+		XCTAssert(results.at(0)?.isSignalComplete == true)
 	}
 	
 	func testLast() {
@@ -1134,7 +1143,7 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r0.count == 2)
 		XCTAssert(r0.at(0)?.value == 10)
-		XCTAssert(r0.at(1)?.isSignalClosed == true)
+		XCTAssert(r0.at(1)?.isSignalComplete == true)
 		
 		var r1 = [Result<Int>]()
 		_ = Signal.from(values: [5, 6, 7, 8, 9, 10]).last() { v in v < 7 }.subscribe { (r: Result<Int>) -> Void in
@@ -1142,7 +1151,7 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(r1.count == 2)
 		XCTAssert(r1.at(0)?.value == 6)
-		XCTAssert(r1.at(1)?.isSignalClosed == true)
+		XCTAssert(r1.at(1)?.isSignalComplete == true)
 	}
 	
 	func testSample() {
@@ -1173,7 +1182,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 1)
 		XCTAssert(results.at(1)?.value == 5)
 		XCTAssert(results.at(2)?.value == 13)
-		XCTAssert(results.at(3)?.isSignalClosed == true)
+		XCTAssert(results.at(3)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1189,7 +1198,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 5)
 		XCTAssert(results.at(3)?.value == 6)
 		XCTAssert(results.at(4)?.value == 7)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testSkipLast() {
@@ -1203,7 +1212,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 2)
 		XCTAssert(results.at(3)?.value == 3)
 		XCTAssert(results.at(4)?.value == 4)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testTake() {
@@ -1215,7 +1224,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 0)
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
-		XCTAssert(results.at(3)?.isSignalClosed == true)
+		XCTAssert(results.at(3)?.isSignalComplete == true)
 	}
 	
 	func testTakeLast() {
@@ -1227,7 +1236,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 5)
 		XCTAssert(results.at(1)?.value == 6)
 		XCTAssert(results.at(2)?.value == 7)
-		XCTAssert(results.at(3)?.isSignalClosed == true)
+		XCTAssert(results.at(3)?.isSignalComplete == true)
 	}
 	
 	func testCombineLatest2() {
@@ -1257,7 +1266,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == "0 3.3")
 		XCTAssert(results.at(3)?.value == "1 3.3")
 		XCTAssert(results.at(4)?.value == "2 3.3")
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1292,7 +1301,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == "0 3.3 World")
 		XCTAssert(results.at(3)?.value == "1 3.3 World")
 		XCTAssert(results.at(4)?.value == "1 3.3 !")
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1330,7 +1339,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == "0 3.3 Hello 12")
 		XCTAssert(results.at(3)?.value == "0 3.3 World 12")
 		XCTAssert(results.at(4)?.value == "1 3.3 World 12")
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1372,7 +1381,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(3)?.value == "0 3.3 World 12 true")
 		XCTAssert(results.at(4)?.value == "1 3.3 World 12 true")
 		XCTAssert(results.at(5)?.value == "1 3.3 World 12 false")
-		XCTAssert(results.at(6)?.isSignalClosed == true)
+		XCTAssert(results.at(6)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1381,7 +1390,7 @@ class SignalReactiveTests: XCTestCase {
 		var results1 = [Result<String>]()
 		let (leftInput1, leftSignal1) = Signal<Int>.create()
 		let (rightInput1, rightSignal1) = Signal<Double>.create()
-		let ep1 = leftSignal1.join(withRight: rightSignal1, leftEnd: { v -> Signal<()> in Signal<()>.preclosed() }, rightEnd: { v in Signal<()>.preclosed() }) { tuple in return "Unexpected \(tuple.0) \(tuple.1)" }.subscribe {
+		let ep1 = leftSignal1.intersect(withRight: rightSignal1, leftEnd: { v -> Signal<()> in Signal<()>.preclosed() }, rightEnd: { v in Signal<()>.preclosed() }) { tuple in return "Unexpected \(tuple.0) \(tuple.1)" }.subscribe {
 			results1.append($0)
 		}
 		leftInput1.send(value: 0)
@@ -1394,14 +1403,14 @@ class SignalReactiveTests: XCTestCase {
 		rightInput1.send(value: 4.4)
 		leftInput1.close()
 		XCTAssert(results1.count == 1)
-		XCTAssert(results1.first?.isSignalClosed == true)
+		XCTAssert(results1.first?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep1) {}
 		
 		var results2 = [Result<String>]()
 		let (leftInput2, leftSignal2) = Signal<Int>.create { s in s.multicast() }
 		let (rightInput2, rightSignal2) = Signal<Double>.create { s in s.multicast() }
-		let ep2 = leftSignal2.join(withRight: rightSignal2, leftEnd: { v in leftSignal2 }, rightEnd: { v in rightSignal2 }) { tuple in return "\(tuple.0) \(tuple.1)" }.subscribe {
+		let ep2 = leftSignal2.intersect(withRight: rightSignal2, leftEnd: { v in leftSignal2 }, rightEnd: { v in rightSignal2 }) { tuple in return "\(tuple.0) \(tuple.1)" }.subscribe {
 			results2.append($0)
 		}
 		leftInput2.send(value: 0)
@@ -1426,7 +1435,7 @@ class SignalReactiveTests: XCTestCase {
 		var results3 = [Result<String>]()
 		let (leftInput3, leftSignal3) = Signal<Int>.create { s in s.multicast() }
 		let (rightInput3, rightSignal3) = Signal<Double>.create { s in s.multicast() }
-		let ep3 = leftSignal3.join(withRight: rightSignal3, leftEnd: { v in leftSignal3.skip(1) }, rightEnd: { v in rightSignal3.skip(1) }) { tuple in return "\(tuple.0) \(tuple.1)" }.subscribe {
+		let ep3 = leftSignal3.intersect(withRight: rightSignal3, leftEnd: { v in leftSignal3.skip(1) }, rightEnd: { v in rightSignal3.skip(1) }) { tuple in return "\(tuple.0) \(tuple.1)" }.subscribe {
 			results3.append($0)
 		}
 		leftInput3.send(value: 0)
@@ -1453,11 +1462,11 @@ class SignalReactiveTests: XCTestCase {
 		withExtendedLifetime(ep3) {}
 	}
 	
-	func testGroupJoin() {
+	func testGroupIntersect() {
 		var results1 = [Result<String>]()
 		let (leftInput1, leftSignal1) = Signal<Int>.create()
 		let (rightInput1, rightSignal1) = Signal<Double>.create()
-		let ep1 = leftSignal1.groupJoin(withRight: rightSignal1, leftEnd: { v -> Signal<()> in Signal<()>.preclosed() }, rightEnd: { v in Signal<()>.preclosed() }) { tuple in tuple.1.map { "\(tuple.0) \($0)" } }.subscribe {
+		let ep1 = leftSignal1.groupIntersect(withRight: rightSignal1, leftEnd: { v -> Signal<()> in Signal<()>.preclosed() }, rightEnd: { v in Signal<()>.preclosed() }) { tuple in tuple.1.map { "\(tuple.0) \($0)" } }.subscribe {
 			switch $0 {
 			case .success(let v):
 				v.subscribeValuesUntilEnd {
@@ -1476,14 +1485,14 @@ class SignalReactiveTests: XCTestCase {
 		rightInput1.send(value: 4.4)
 		leftInput1.close()
 		XCTAssert(results1.count == 1)
-		XCTAssert(results1.first?.isSignalClosed == true)
+		XCTAssert(results1.first?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep1) {}
 		
 		var results2 = [Result<String>]()
 		let (leftInput2, leftSignal2) = Signal<Int>.create { s in s.multicast() }
 		let (rightInput2, rightSignal2) = Signal<Double>.create { s in s.multicast() }
-		let ep2 = leftSignal2.groupJoin(withRight: rightSignal2, leftEnd: { v in leftSignal2 }, rightEnd: { v in rightSignal2 }) { tuple in tuple.1.map { "\(tuple.0) \($0)" } }.subscribe {
+		let ep2 = leftSignal2.groupIntersect(withRight: rightSignal2, leftEnd: { v in leftSignal2 }, rightEnd: { v in rightSignal2 }) { tuple in tuple.1.map { "\(tuple.0) \($0)" } }.subscribe {
 			switch $0 {
 			case .success(let v):
 				v.subscribeValuesUntilEnd {
@@ -1515,7 +1524,7 @@ class SignalReactiveTests: XCTestCase {
 		var results3 = [Result<String>]()
 		let (leftInput3, leftSignal3) = Signal<Int>.create { s in s.multicast() }
 		let (rightInput3, rightSignal3) = Signal<Double>.create { s in s.multicast() }
-		let ep3 = leftSignal3.groupJoin(withRight: rightSignal3, leftEnd: { v in leftSignal3.skip(1) }, rightEnd: { v in rightSignal3.skip(1) }) { tuple in tuple.1.map { "\(tuple.0) \($0)" } }.subscribe {
+		let ep3 = leftSignal3.groupIntersect(withRight: rightSignal3, leftEnd: { v in leftSignal3.skip(1) }, rightEnd: { v in rightSignal3.skip(1) }) { tuple in tuple.1.map { "\(tuple.0) \($0)" } }.subscribe {
 			switch $0 {
 			case .success(let v):
 				v.subscribeValuesUntilEnd {
@@ -1553,8 +1562,8 @@ class SignalReactiveTests: XCTestCase {
 		let spookeysArray = ["👻", "🎃", "👹", "😈"]
 		let animalsArray = ["🐶", "🐱", "🐭", "🐨"]
 		let smileys = Signal<String>.from(values: smileysArray, error: nil).playback()
-		let spookeys = Signal<String>.from(values: spookeysArray, error: SignalError.closed).playback()
-		let animals = Signal<String>.from(values: animalsArray, error: SignalError.cancelled).playback()
+		let spookeys = Signal<String>.from(values: spookeysArray, error: SignalComplete.closed).playback()
+		let animals = Signal<String>.from(values: animalsArray, error: SignalComplete.cancelled).playback()
 		
 		var result = [String]()
 		let ep = Signal<String>.merge(smileys, spookeys, animals).subscribeValues {
@@ -1577,7 +1586,23 @@ class SignalReactiveTests: XCTestCase {
 		for i in 0..<20 {
 			XCTAssert(results2.at(i)?.value == i)
 		}
-		XCTAssert(results2.at(20)?.error as? SignalError == .cancelled)
+		XCTAssert(results2.at(20)?.error as? SignalComplete == .closed)
+		
+		var emptyMergeResults = [Result<Int>]()
+		let emptyMerge = Signal<Int>.merge([]).subscribe {
+			emptyMergeResults.append($0)
+		}
+		XCTAssert(emptyMergeResults.count == 1)
+		XCTAssert(emptyMergeResults.at(0)?.isSignalComplete == true)
+		withExtendedLifetime(emptyMerge) {}
+		
+		var immediatelyClosedMergeResults = [Result<Int>]()
+		let immediatelyClosedMerge = Signal<Int>.merge([Signal<Int>.preclosed()]).subscribe {
+			immediatelyClosedMergeResults.append($0)
+		}
+		XCTAssert(immediatelyClosedMergeResults.count == 1)
+		XCTAssert(immediatelyClosedMergeResults.at(0)?.isSignalComplete == true)
+		withExtendedLifetime(immediatelyClosedMerge) {}
 	}
 	
 	func testStartWith() {
@@ -1589,7 +1614,7 @@ class SignalReactiveTests: XCTestCase {
 		for i in 0..<20 {
 			XCTAssert(results.at(i)?.value == i)
 		}
-		XCTAssert(results.at(20)?.isSignalClosed == true)
+		XCTAssert(results.at(20)?.isSignalComplete == true)
 	}
 	
 	func testEndWith() {
@@ -1601,13 +1626,13 @@ class SignalReactiveTests: XCTestCase {
 		for i in 0..<20 {
 			XCTAssert(results.at(i)?.value == i)
 		}
-		XCTAssert(results.at(20)?.isSignalClosed == true)
+		XCTAssert(results.at(20)?.isSignalComplete == true)
 	}
 	
 	func testSwitchLatest() {
 		var results = [Result<Int>]()
 		let (input, signal) = Signal<Signal<Int>>.create()
-		let ep = Signal<Int>.switchLatest(signal).subscribe { (r: Result<Int>) in
+		let ep = signal.switchLatest().subscribe { (r: Result<Int>) in
 			results.append(r)
 		}
 		let (input1, child1) = Signal<Int>.create()
@@ -1648,7 +1673,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(5)?.value == 30)
 		XCTAssert(results.at(6)?.value == 31)
 		XCTAssert(results.at(7)?.value == 32)
-		XCTAssert(results.at(8)?.isSignalClosed == true)
+		XCTAssert(results.at(8)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1676,7 +1701,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value?.0 == 1 && results.at(1)?.value?.1 == 11)
 		XCTAssert(results.at(2)?.value?.0 == 2 && results.at(2)?.value?.1 == 12)
 		XCTAssert(results.at(3)?.value?.0 == 3 && results.at(3)?.value?.1 == 13)
-		XCTAssert(results.at(4)?.isSignalClosed == true)
+		XCTAssert(results.at(4)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1711,7 +1736,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value?.0 == 1 && results.at(1)?.value?.1 == 11 && results.at(1)?.value?.2 == 21)
 		XCTAssert(results.at(2)?.value?.0 == 2 && results.at(2)?.value?.1 == 12 && results.at(2)?.value?.2 == 22)
 		XCTAssert(results.at(3)?.value?.0 == 3 && results.at(3)?.value?.1 == 13 && results.at(3)?.value?.2 == 23)
-		XCTAssert(results.at(4)?.isSignalClosed == true)
+		XCTAssert(results.at(4)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1751,7 +1776,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value?.0 == 1 && results.at(1)?.value?.1 == 11 && results.at(1)?.value?.2 == 21 && results.at(1)?.value?.3 == 31)
 		XCTAssert(results.at(2)?.value?.0 == 2 && results.at(2)?.value?.1 == 12 && results.at(2)?.value?.2 == 22 && results.at(2)?.value?.3 == 32)
 		XCTAssert(results.at(3)?.value?.0 == 3 && results.at(3)?.value?.1 == 13 && results.at(3)?.value?.2 == 23 && results.at(3)?.value?.3 == 33)
-		XCTAssert(results.at(4)?.isSignalClosed == true)
+		XCTAssert(results.at(4)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
@@ -1797,23 +1822,17 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value?.0 == 1 && results.at(1)?.value?.1 == 11 && results.at(1)?.value?.2 == 21 && results.at(1)?.value?.3 == 31 && results.at(1)?.value?.4 == 41)
 		XCTAssert(results.at(2)?.value?.0 == 2 && results.at(2)?.value?.1 == 12 && results.at(2)?.value?.2 == 22 && results.at(2)?.value?.3 == 32 && results.at(2)?.value?.4 == 42)
 		XCTAssert(results.at(3)?.value?.0 == 3 && results.at(3)?.value?.1 == 13 && results.at(3)?.value?.2 == 23 && results.at(3)?.value?.3 == 33 && results.at(3)?.value?.4 == 43)
-		XCTAssert(results.at(4)?.isSignalClosed == true)
+		XCTAssert(results.at(4)?.isSignalComplete == true)
 		
 		withExtendedLifetime(ep) {}
 	}
 	
 	func testCatch() {
 		var results1 = [Result<Int>]()
-		let signal1 = Signal<Int>.from(values: 0..<10)
+		let signal1 = Signal<Int>.from(values: 0..<10, error: TestError.zeroValue)
 		let signal2 = Signal<Int>.from(values: 10..<20)
-		var alternateAvailable = true
 		_ = signal1.catchError { e -> Signal<Int>? in
-			if e as? SignalError == .closed, alternateAvailable {
-				alternateAvailable = false
-				return signal2
-			} else {
-				return nil
-			}
+			return signal2
 		}.subscribe { (r: Result<Int>) in
 			results1.append(r)
 		}
@@ -1821,18 +1840,18 @@ class SignalReactiveTests: XCTestCase {
 		for i in 0..<20 {
 			XCTAssert(results1.at(i)?.value == i)
 		}
-		XCTAssert(results1.at(20)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(20)?.error as? SignalComplete == .closed)
 		
 		var results2 = [Result<Int>]()
-		let signal3 = Signal<Int>.from(values: 0..<10)
-		_ = signal3.catchError { e in (10..<20, SignalError.closed) }.subscribe { (r: Result<Int>) in
+		let signal3 = Signal<Int>.from(values: 0..<10, error: TestError.twoValue)
+		_ = signal3.catchError { e in (10..<20, SignalComplete.closed) }.subscribe { (r: Result<Int>) in
 			results2.append(r)
 		}
 		XCTAssert(results2.count == 21)
 		for i in 0..<20 {
 			XCTAssert(results2.at(i)?.value == i)
 		}
-		XCTAssert(results2.at(20)?.isSignalClosed == true)
+		XCTAssert(results2.at(20)?.isSignalComplete == true)
 	}
 	
 	func testRetry() {
@@ -1851,7 +1870,7 @@ class SignalReactiveTests: XCTestCase {
 				for j in 0..<5 {
 					i.send(value: j)
 				}
-				i.send(error: SignalError.closed)
+				i.send(error: SignalComplete.closed)
 			}
 		}.retry(count: 1, delayInterval: .fromSeconds(0.1), context: coordinator.direct).subscribe { (r: Result<Int>) in
 			results.append(r)
@@ -1874,7 +1893,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(7)?.value == 2)
 		XCTAssert(results.at(8)?.value == 3)
 		XCTAssert(results.at(9)?.value == 4)
-		XCTAssert(results.at(10)?.isSignalClosed == true)
+		XCTAssert(results.at(10)?.isSignalComplete == true)
 	}
 	
 	func testDelay() {
@@ -1898,7 +1917,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 2)
 		XCTAssert(results.at(3)?.value == 1)
 		XCTAssert(results.at(4)?.value == 0)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 		XCTAssert(times.at(0).map { (v: UInt64) -> Bool in v == 50_000_000 } == true)
 		XCTAssert(times.at(1).map { (v: UInt64) -> Bool in v == 100_000_000 } == true)
 		XCTAssert(times.at(2).map { (v: UInt64) -> Bool in v == 150_000_000 } == true)
@@ -1911,7 +1930,7 @@ class SignalReactiveTests: XCTestCase {
 		var results = [Result<Int>]()
 		let coordinator = DebugContextCoordinator()
 		var times = [UInt64]()
-		let ep = intervalSignal(.seconds(1), initial: .seconds(0), context: coordinator.global).timeout(interval: .seconds(5), resetOnValue: false, context: coordinator.global).delay(interval: .seconds(5), context: coordinator.global).subscribe { (r: Result<Int>) in
+		let ep = Signal.interval(.seconds(1), initial: .seconds(0), context: coordinator.global).timeout(interval: .seconds(5), resetOnValue: false, context: coordinator.global).delay(interval: .seconds(5), context: coordinator.global).subscribe { (r: Result<Int>) in
 			results.append(r)
 			times.append(coordinator.currentTime)
 		}
@@ -1926,7 +1945,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 2)
 		XCTAssert(results.at(3)?.value == 3)
 		XCTAssert(results.at(4)?.value == 4)
-		XCTAssert(results.at(5)?.error as? SignalError == .timeout)
+		XCTAssert(results.at(5)?.error as? SignalReactiveError == .timeout)
 		
 		// Explanation of the `4` at the end of these times:
 		// `intervalSignal` is invoked asynchronously on `coordinator.global`, adding 1
@@ -1962,7 +1981,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value == 2)
 		XCTAssert(results.at(3)?.value == 1)
 		XCTAssert(results.at(4)?.value == 0)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 
 		// Explanation of the `1` at the end of these times:
 		// the timer started by `delay` completes asynchronously on `coordinator.global`, adding 1
@@ -1976,7 +1995,7 @@ class SignalReactiveTests: XCTestCase {
 	
 	func testOn() {
 		var results = [String]()
-		let j = Signal<Int>.from(values: 0..<5).onActivate {
+		let j = Signal<Int>.from(values: 0..<5, error: SignalReactiveError.timeout).onActivate {
 			results.append("activate")
 		}.onDeactivate {
 			results.append("deactivate")
@@ -1993,7 +2012,7 @@ class SignalReactiveTests: XCTestCase {
             results.append("Output: \(r)")
         }
         
-        _ = try? j.join(to: i1)
+        _ = try? j.bind(to: i1)
         withExtendedLifetime(ep1) {}
         _ = j.disconnect()
         
@@ -2014,9 +2033,9 @@ class SignalReactiveTests: XCTestCase {
             "4",
             "success(4)",
             "Output: success(4)",
-            "failure(CwlSignal.SignalError.closed)",
-            "closed",
-            "Output: failure(CwlSignal.SignalError.closed)",
+            "failure(CwlSignal.SignalReactiveError.timeout)",
+            "timeout",
+            "Output: failure(CwlSignal.SignalReactiveError.timeout)",
             "deactivate",
         ])
 
@@ -2026,7 +2045,7 @@ class SignalReactiveTests: XCTestCase {
         let ep2 = o2.subscribe { r in
             results.append("Output: \(r)")
         }
-        _ = try? j.join(to: i2)
+        _ = try? j.bind(to: i2)
         withExtendedLifetime(ep2) {}
 
 		XCTAssert(results == [
@@ -2046,9 +2065,9 @@ class SignalReactiveTests: XCTestCase {
 			"4",
 			"success(4)",
 			"Output: success(4)",
-			"failure(CwlSignal.SignalError.closed)",
-			"closed",
-			"Output: failure(CwlSignal.SignalError.closed)",
+			"failure(CwlSignal.SignalReactiveError.timeout)",
+			"timeout",
+			"Output: failure(CwlSignal.SignalReactiveError.timeout)",
 			"deactivate",
 		])
 	}
@@ -2063,8 +2082,8 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value?.value == 1)
 		XCTAssert(results.at(2)?.value?.value == 2)
 		XCTAssert(results.at(3)?.value?.value == 3)
-		XCTAssert(results.at(4)?.value?.isSignalClosed == true)
-		XCTAssert(results.at(5)?.error as? SignalError == .closed)
+		XCTAssert(results.at(4)?.value?.isSignalComplete == true)
+		XCTAssert(results.at(5)?.error as? SignalComplete == .closed)
 	}
 	
 	func testDematerialize() {
@@ -2077,7 +2096,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
 		XCTAssert(results.at(3)?.value == 3)
-		XCTAssert(results.at(4)?.isSignalClosed == true)
+		XCTAssert(results.at(4)?.isSignalComplete == true)
 	}
 	
 	func testTimeInterval() {
@@ -2112,7 +2131,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert((results.at(2)?.value).map(compare(0.07, 1e-6)) == true)
 		XCTAssert((results.at(3)?.value).map(compare(0.10, 1e-6)) == true)
 		XCTAssert((results.at(4)?.value).map(compare(0.05, 1e-6)) == true)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testTimeout() {
@@ -2142,7 +2161,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
 
-		switch results.at(3)?.error as? SignalError {
+		switch results.at(3)?.error as? SignalReactiveError {
 		case .some(.timeout): break
 		default: XCTFail()
 		}
@@ -2176,7 +2195,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(2)?.value?.1.uptimeNanoseconds == 150_000_000)
 		XCTAssert(results.at(3)?.value?.1.uptimeNanoseconds == 250_000_000)
 		XCTAssert(results.at(4)?.value?.1.uptimeNanoseconds == 300_000_000)
-		XCTAssert(results.at(5)?.isSignalClosed == true)
+		XCTAssert(results.at(5)?.isSignalComplete == true)
 	}
 	
 	func testAll() {
@@ -2186,14 +2205,14 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == false)
-		XCTAssert(results.at(1)?.isSignalClosed == true)
+		XCTAssert(results.at(1)?.isSignalComplete == true)
 
 		_ = Signal<Int>.from(values: 1...10).all { (v: Int) -> Bool in v > 0 }.subscribe { (r: Result<Bool>) in
 			results.append(r)
 		}
 		XCTAssert(results.count == 4)
 		XCTAssert(results.at(2)?.value == true)
-		XCTAssert(results.at(3)?.isSignalClosed == true)
+		XCTAssert(results.at(3)?.isSignalComplete == true)
 	}
 	
 	func testAmb() {
@@ -2223,7 +2242,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 0)
 		XCTAssert(results.at(1)?.value == 3)
 		XCTAssert(results.at(2)?.value == 6)
-		XCTAssert(results.at(3)?.isSignalClosed == true)
+		XCTAssert(results.at(3)?.isSignalComplete == true)
 	}
 	
 	func testSome() {
@@ -2231,13 +2250,13 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 1...10).some { $0 == 5 }.subscribe { results2.append($0) }
 		XCTAssert(results2.count == 2)
 		XCTAssert(results2.at(0)?.value == true)
-		XCTAssert(results2.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results2.at(1)?.error as? SignalComplete == .closed)
 
 		var results1 = [Result<Bool>]()
 		_ = Signal<Int>.from(values: 1...10).some { $0 == 15 }.subscribe { results1.append($0) }
 		XCTAssert(results1.count == 2)
 		XCTAssert(results1.at(0)?.value == false)
-		XCTAssert(results1.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testContains() {
@@ -2245,13 +2264,13 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 1...10).contains(value: 5).subscribe { results2.append($0) }
 		XCTAssert(results2.count == 2)
 		XCTAssert(results2.at(0)?.value == true)
-		XCTAssert(results2.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results2.at(1)?.error as? SignalComplete == .closed)
 
 		var results1 = [Result<Bool>]()
 		_ = Signal<Int>.from(values: 1...10).contains(value: 15).subscribe { results1.append($0) }
 		XCTAssert(results1.count == 2)
 		XCTAssert(results1.at(0)?.value == false)
-		XCTAssert(results1.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testDefaultIfEmpty() {
@@ -2261,13 +2280,13 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results1.at(0)?.value == 1)
 		XCTAssert(results1.at(1)?.value == 2)
 		XCTAssert(results1.at(2)?.value == 3)
-		XCTAssert(results1.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(3)?.error as? SignalComplete == .closed)
 
 		var results2 = [Result<Int>]()
 		_ = Signal<Int>.from(values: 0..<0).defaultIfEmpty(value: 5).subscribe { results2.append($0) }
 		XCTAssert(results2.count == 2)
 		XCTAssert(results2.at(0)?.value == 5)
-		XCTAssert(results2.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results2.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testSwitchIfEmpty() {
@@ -2278,7 +2297,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results1.at(0)?.value == 1)
 		XCTAssert(results1.at(1)?.value == 2)
 		XCTAssert(results1.at(2)?.value == 3)
-		XCTAssert(results1.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(3)?.error as? SignalComplete == .closed)
 
 		var results2 = [Result<Int>]()
 		let alternate2 = Signal<Int>.from(values: 11...13)
@@ -2287,7 +2306,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results2.at(0)?.value == 11)
 		XCTAssert(results2.at(1)?.value == 12)
 		XCTAssert(results2.at(2)?.value == 13)
-		XCTAssert(results2.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results2.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testSequenceEqual() {
@@ -2296,7 +2315,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 11...14).sequenceEqual(to: alternate1).subscribe { results1.append($0) }
 		XCTAssert(results1.count == 2)
 		XCTAssert(results1.at(0)?.value == false)
-		XCTAssert(results1.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results1.at(1)?.error as? SignalComplete == .closed)
 
 		var results2 = [Result<Bool>]()
 		let alternate2 = Signal<Int>.from(values: 11...13)
@@ -2305,7 +2324,7 @@ class SignalReactiveTests: XCTestCase {
 		}
 		XCTAssert(results2.count == 2)
 		XCTAssert(results2.at(0)?.value == true)
-		XCTAssert(results2.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results2.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testSkipUntil() {
@@ -2328,7 +2347,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 3)
 		XCTAssert(results.at(1)?.value == 4)
 		XCTAssert(results.at(2)?.value == 5)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testSkipWhile() {
@@ -2349,7 +2368,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 3)
 		XCTAssert(results.at(1)?.value == 4)
 		XCTAssert(results.at(2)?.value == 5)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testSkipWhileWithState() {
@@ -2373,7 +2392,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 3)
 		XCTAssert(results.at(1)?.value == 4)
 		XCTAssert(results.at(2)?.value == 5)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testTakeUntil() {
@@ -2396,7 +2415,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 0)
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testTakeWhile() {
@@ -2417,7 +2436,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 0)
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testTakeWhileWithState() {
@@ -2441,7 +2460,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(0)?.value == 0)
 		XCTAssert(results.at(1)?.value == 1)
 		XCTAssert(results.at(2)?.value == 2)
-		XCTAssert(results.at(3)?.error as? SignalError == .closed)
+		XCTAssert(results.at(3)?.error as? SignalComplete == .closed)
 	}
 	
 	func testConcat() {
@@ -2454,7 +2473,7 @@ class SignalReactiveTests: XCTestCase {
 		XCTAssert(results.at(3)?.value == 4)
 		XCTAssert(results.at(4)?.value == 5)
 		XCTAssert(results.at(5)?.value == 6)
-		XCTAssert(results.at(6)?.error as? SignalError == .closed)
+		XCTAssert(results.at(6)?.error as? SignalComplete == .closed)
 	}
 	
 	func testCount() {
@@ -2462,7 +2481,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 4...8).count().subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 5)
-		XCTAssert(results.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testMin() {
@@ -2470,7 +2489,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 1...3).min().subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 1)
-		XCTAssert(results.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testMax() {
@@ -2478,7 +2497,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 2...5).max().subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 5)
-		XCTAssert(results.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testReduceToSingleValue() {
@@ -2486,7 +2505,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 1...3).aggregate(5) { (state, v) in state + v }.subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 11)
-		XCTAssert(results.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testSum() {
@@ -2494,7 +2513,7 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 1...3).sum().subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 6)
-		XCTAssert(results.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results.at(1)?.error as? SignalComplete == .closed)
 	}
 	
 	func testAverage() {
@@ -2502,6 +2521,6 @@ class SignalReactiveTests: XCTestCase {
 		_ = Signal<Int>.from(values: 1...3).average().subscribe { r in results.append(r) }
 		XCTAssert(results.count == 2)
 		XCTAssert(results.at(0)?.value == 2)
-		XCTAssert(results.at(1)?.error as? SignalError == .closed)
+		XCTAssert(results.at(1)?.error as? SignalComplete == .closed)
 	}
 }

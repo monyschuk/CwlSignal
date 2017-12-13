@@ -25,14 +25,14 @@
 
 /// Instances of `SignalActionTarget` can be used as the "target" of Cocoa "target-action" events and the result will be emitted as a signal.
 /// Instance of this class are owned by the output `signal` so if you're holding onto the signal, you can drop references to this class itself.
-open class SignalActionTarget: NSObject {
+open class SignalActionTarget: NSObject, SignalInterface {
 	private var signalInput: SignalInput<Any?>? = nil
 	
 	// Ownership note: we are owned by the output signal so we only weakly retain it.
 	private weak var signalOutput: SignalMulti<Any?>? = nil
 	
 	/// The `signal` emits the actions received
-	public var signal: SignalMulti<Any?> {
+	public var signal: Signal<Any?> {
 		// If there's a current signal output, return it
 		if let so = signalOutput {
 			return so
@@ -148,11 +148,11 @@ extension Signal {
 	///   - keyPath: passed to `addObserver(_:forKeyPath:options:context:)`
 	///   - initial: if true, NSKeyValueObservingOptions.initial is included in the options passed to `addObserver(_:forKeyPath:options:context:)`
 	/// - Returns: a signal which emits the observation results
-	public static func keyValueObserving(_ target: NSObject, keyPath: String, initial: Bool = true) -> Signal<Value> {
-		return signalKeyValueObserving(target, keyPath: keyPath, initial: initial).transform { (r: Result<Any>, n: SignalNext<Value>) in
+	public static func keyValueObserving(_ target: NSObject, keyPath: String, initial: Bool = true) -> Signal<OutputValue> {
+		return signalKeyValueObserving(target, keyPath: keyPath, initial: initial).transform { (r: Result<Any>, n: SignalNext<OutputValue>) in
 			switch r {
 			case .success(let v):
-				if let t = v as? Value {
+				if let t = v as? OutputValue {
 					n.send(value: t)
 				}
 			case .failure(let e):
@@ -192,8 +192,8 @@ extension Signal {
 	///   - target: the object upon which `setValue(_:forKeyPath:)` will be invoked
 	///   - keyPath: passed to `setValue(_:forKeyPath:)`
 	/// - Returns: the `SignalEnpoint` created by this action (releasing the endpoint will cease any further setting)
-	public func kvcSetter(context: Exec, target: NSObject, keyPath: String) -> SignalEndpoint<Value> {
-		return subscribeValues(context: context) { [weak target] (value: Value) -> Void in
+	public func kvcSetter(context: Exec, target: NSObject, keyPath: String) -> SignalEndpoint<OutputValue> {
+		return subscribeValues(context: context) { [weak target] (value: OutputValue) -> Void in
 			target?.setValue(value, forKeyPath: keyPath)
 		}
 	}
